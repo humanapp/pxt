@@ -1126,12 +1126,34 @@ namespace ts.pxtc {
         }
 
         function analyzeClosedObjectLiteral(node: ObjectLiteralExpression, contextualType: Type) {
+            function reject(reason: string): ObjectLiteralRecordCandidate {
+                return { eligible: false, reason, fields: [] as string[], fieldDecls: {} as pxt.Map<FieldWithAddInfo>, shapeKey: "" };
+            }
+
+            if (!contextualType)
+                return reject("noContextualType");
+            if (contextualType.flags & TypeFlags.Union) {
+                const union = contextualType as UnionType;
+                const accepted: ObjectLiteralRecordCandidate[] = [];
+                for (const arm of union.types || []) {
+                    const candidate = analyzeClosedObjectLiteralForType(node, arm);
+                    if (candidate.eligible)
+                        accepted.push(candidate);
+                }
+                if (accepted.length == 1)
+                    return accepted[0];
+                if (accepted.length > 1)
+                    return reject("unionAmbiguous");
+                return reject("unionNoMatchingArm");
+            }
+            return analyzeClosedObjectLiteralForType(node, contextualType);
+        }
+
+        function analyzeClosedObjectLiteralForType(node: ObjectLiteralExpression, contextualType: Type) {
             const fields: string[] = [];
             const fieldDecls: pxt.Map<FieldWithAddInfo> = {};
             const reject = (reason: string) => ({ eligible: false, reason, fields, fieldDecls, shapeKey: "" });
 
-            if (!contextualType)
-                return reject("noContextualType");
             if (!isInterfaceType(contextualType))
                 return reject("contextualTypeNotStructural");
 

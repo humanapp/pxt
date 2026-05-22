@@ -201,6 +201,7 @@ ${hexLiteralAsm(data)}
             switch (name) {
                 case "_pxt_map_get":
                 case "_pxt_map_set":
+                case "_pxt_map_set_by_string":
                 case "_pxt_array_get":
                 case "_pxt_array_set":
                 case "_pxt_buffer_get":
@@ -1218,6 +1219,34 @@ ${baseLabel}_nochk:
             this.ifaceCallCore(numargs, op, true)
         }
 
+        private emitStringMapSetMethod() {
+            this.traceLowering("emitStringMapSetMethod")
+            this.write(`
+                ${this.helperObject("set string map")}
+                .section code
+                _pxt_map_set_by_string:
+                    lsls r4, r0, #30
+                    bne .fail
+                    cmp r0, #0
+                    beq .fail
+                    ldr r3, [r0, #0]
+                `)
+
+            this.write(`
+                ldrh r4, [r3, #8]
+                cmp r4, #${pxt.BuiltInType.RefMap}
+                bne .fail
+            `)
+            this.write(this.t.callCPPPush("pxtrt::mapSetByString"))
+            this.write(`
+                .fail:
+                    mov r1, lr
+                    mov r7, sp
+                    str r7, [r6, #4]
+                    bl pxt::failedCast
+            `)
+        }
+
         private emitArrayMethod(op: string, isBuffer: boolean) {
             this.write(`
             ${this.helperObject(op + " " + (isBuffer ? "buffer" : "array"))}
@@ -1326,6 +1355,8 @@ ${baseLabel}_nochk:
                 if (this.bin.usedThumbHelpers[`_pxt_map_${op}`])
                     this.emitFieldMethod(op)
             }
+            if (this.bin.usedThumbHelpers["_pxt_map_set_by_string"])
+                this.emitStringMapSetMethod()
         }
 
         private emitLambdaTrampoline() {

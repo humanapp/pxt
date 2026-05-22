@@ -1037,6 +1037,7 @@ namespace ts.pxtc {
         const objectLiteralRecordProvenanceVarUnknown: pxt.Map<boolean> = {};
         const objectLiteralRecordProvenanceReturns: pxt.Map<ClassInfo> = {};
         const objectLiteralRecordProvenanceReturnUnknown: pxt.Map<boolean> = {};
+        const objectLiteralRecordProvenanceReturnEscapes: pxt.Map<boolean> = {};
         bin.trace = opts.trace;
         bin.loweringTrace = loweringTrace;
         bin.breakpoints = opts.breakpoints;
@@ -1290,6 +1291,8 @@ namespace ts.pxtc {
                 delete objectLiteralRecordProvenanceReturns[key];
             for (const key of Object.keys(objectLiteralRecordProvenanceReturnUnknown))
                 delete objectLiteralRecordProvenanceReturnUnknown[key];
+            for (const key of Object.keys(objectLiteralRecordProvenanceReturnEscapes))
+                delete objectLiteralRecordProvenanceReturnEscapes[key];
             objectLiteralRecordProvenanceAnalyzed = false;
         }
 
@@ -1340,6 +1343,7 @@ namespace ts.pxtc {
             let currentVarUnknown: pxt.Map<boolean> = {};
             let currentReturns: pxt.Map<ClassInfo> = {};
             let currentReturnUnknown: pxt.Map<boolean> = {};
+            let currentReturnEscapes: pxt.Map<boolean> = {};
 
             function clearMap<T>(map: pxt.Map<T>) {
                 for (const key of Object.keys(map))
@@ -1394,11 +1398,25 @@ namespace ts.pxtc {
                     toUnknown[key] = fromUnknown[key];
             }
 
+            function markReturnEscape(expr: Expression, escapes: pxt.Map<boolean>) {
+                if (!expr)
+                    return;
+                if (expr.kind == SK.CallExpression) {
+                    const decl = getDeclCore((expr as CallExpression).expression);
+                    if (decl && decl.kind == SK.FunctionDeclaration) {
+                        const key = nodeKey(decl);
+                        if (currentReturns[key])
+                            escapes[key] = true;
+                    }
+                }
+            }
+
             function analyzeIteration() {
                 const nextVars: pxt.Map<ClassInfo> = {};
                 const nextVarUnknown: pxt.Map<boolean> = {};
                 const nextReturns: pxt.Map<ClassInfo> = {};
                 const nextReturnUnknown: pxt.Map<boolean> = {};
+                const nextReturnEscapes: pxt.Map<boolean> = {};
 
                 function analyzeAction(action: FunctionLikeDeclaration) {
                     const localVars: pxt.Map<ClassInfo> = {};
@@ -1484,6 +1502,8 @@ namespace ts.pxtc {
                                 invalidateExpression((expr as PropertyAccessExpression).expression);
                         } else if (expr.kind == SK.ElementAccessExpression) {
                             invalidateExpression((expr as ElementAccessExpression).expression);
+                        } else if (expr.kind == SK.CallExpression) {
+                            markReturnEscape(expr, nextReturnEscapes);
                         }
                     }
 
@@ -1635,11 +1655,14 @@ namespace ts.pxtc {
 
                 const changed =
                     !sameRecordFacts(currentVars, currentVarUnknown, nextVars, nextVarUnknown) ||
-                    !sameRecordFacts(currentReturns, currentReturnUnknown, nextReturns, nextReturnUnknown);
+                    !sameRecordFacts(currentReturns, currentReturnUnknown, nextReturns, nextReturnUnknown) ||
+                    Object.keys(currentReturnEscapes).some(key => !nextReturnEscapes[key]) ||
+                    Object.keys(nextReturnEscapes).some(key => !currentReturnEscapes[key]);
                 currentVars = nextVars;
                 currentVarUnknown = nextVarUnknown;
                 currentReturns = nextReturns;
                 currentReturnUnknown = nextReturnUnknown;
+                currentReturnEscapes = nextReturnEscapes;
                 return changed;
             }
 
@@ -1650,6 +1673,10 @@ namespace ts.pxtc {
 
             copyRecordFacts(currentVars, currentVarUnknown, objectLiteralRecordProvenanceVars, objectLiteralRecordProvenanceVarUnknown);
             copyRecordFacts(currentReturns, currentReturnUnknown, objectLiteralRecordProvenanceReturns, objectLiteralRecordProvenanceReturnUnknown);
+            for (const key of Object.keys(currentReturnEscapes)) {
+                objectLiteralRecordProvenanceReturnEscapes[key] = true;
+                markObjectLiteralRecordInterfaceFieldsNeeded(currentReturns[key], currentReturns[key].decl, "return");
+            }
             objectLiteralRecordProvenanceAnalyzed = true;
         }
 
@@ -4186,7 +4213,23 @@ ${lbl}: .short 0xffff
                         unhandled(trg, lf("setter not available"), 9253)
                     }
                     proc.emitExpr(emitCallCore(trg, trg, [src], null, decl as FunctionLikeDeclaration))
-                } else if (decl && (decl.kind == SK.PropertySignature || decl.kind == SK.PropertyAssignment || isSlowField(decl))) {
+                } else if (decl && (decl.kind == SK.PropertySignature || decl.kind == SK.PropertyAssignment)) {
+                    const receiver = (trg as PropertyAccessExpression).expression;
+                    const recordInfo = expressionRecordClassInfo(receiver);
+                    const fieldName = (trg as PropertyAccessExpression).name.text;
+                    const recordField = recordInfo ? tryGetFieldInfo(recordInfo, fieldName) : null;
+                    if (recordField) {
+                        traceLowering("emitStore.recordFieldStore", trg, [
+                            `declKind=${kindName(decl.kind)}`,
+                            `declName=${declName(decl)}`,
+                            `record=${recordInfo.id}`
+                        ]);
+                        const targetExpr = ir.op(EK.FieldAccess, [emitExpr(receiver)], fieldIndexCore(recordInfo, recordField, false));
+                        proc.emitExpr(ir.op(EK.Store, [targetExpr, emitEscapedExpression(src, "assignment")]));
+                    } else {
+                        proc.emitExpr(emitCallCore(trg, trg, [src], null, decl as FunctionLikeDeclaration))
+                    }
+                } else if (decl && isSlowField(decl)) {
                     proc.emitExpr(emitCallCore(trg, trg, [src], null, decl as FunctionLikeDeclaration))
                 } else {
                     for (; ;) {
@@ -5212,7 +5255,10 @@ ${lbl}: .short 0xffff
             if (node.expression) {
                 v = emitExpr(node.expression)
                 noteFunctionRecordReturn(node.expression)
-                markExpressionRecordInterfaceFieldsNeeded(node.expression, "return")
+                if (!objectLiteralRecords)
+                    markExpressionRecordInterfaceFieldsNeeded(node.expression, "return")
+                else if (objectLiteralRecordProvenanceAnalyzed && objectLiteralRecordProvenanceReturnEscapes[nodeKey(proc.action)])
+                    markExpressionRecordInterfaceFieldsNeeded(node.expression, "return")
             } else if (funcHasReturn(proc.action)) {
                 v = emitLit(undefined) // == return undefined
                 noteFunctionRecordReturn(null)

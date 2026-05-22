@@ -178,6 +178,11 @@ namespace ts.pxtc {
             argsFmt: ["T", "T", "S", "T"],
             value: 0
         },
+        "pxtrt::mapSetByStringOnly": {
+            name: "_pxt_map_set_by_string",
+            argsFmt: ["T", "T", "S", "T"],
+            value: 0
+        },
     }
 
     let EK = ir.EK;
@@ -2926,8 +2931,23 @@ ${lbl}: .short 0xffff
             }
 
             if (!indexer && (t.flags & (TypeFlags.Any | TypeFlags.StructuredOrTypeVariable))) {
-                indexer = assign ? "pxtrt::mapSetGeneric" : "pxtrt::mapGetGeneric"
+                const hasIndexSignature = !!checker.getIndexTypeOfType(t, IndexKind.String) || !!checker.getIndexTypeOfType(t, IndexKind.Number);
+                const mapOnlySet = !!assign && !(t.flags & TypeFlags.Any) && hasIndexSignature;
+                indexer = assign
+                    ? (mapOnlySet ? "pxtrt::mapSetByStringOnly" : "pxtrt::mapSetGeneric")
+                    : "pxtrt::mapGetGeneric"
                 stringOk = true
+                traceLowering("emitIndexedAccess.generic", node, [
+                    `op=${assign ? "set" : "get"}`,
+                    `mapOnlySet=${mapOnlySet}`,
+                    `receiverType=${checker.typeToString(t)}`,
+                    `receiverFlags=${t.flags}`,
+                    `receiverAny=${!!(t.flags & TypeFlags.Any)}`,
+                    `receiverStructured=${!!(t.flags & TypeFlags.StructuredOrTypeVariable)}`,
+                    `receiverIndexSignature=${hasIndexSignature}`,
+                    `argumentKind=${kindName(node.argumentExpression.kind)}`,
+                    `argumentText=${shortNodeText(node.argumentExpression)}`
+                ])
             }
 
             if (indexer) {

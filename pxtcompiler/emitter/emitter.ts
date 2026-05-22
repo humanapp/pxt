@@ -178,11 +178,6 @@ namespace ts.pxtc {
             argsFmt: ["T", "T", "S", "T"],
             value: 0
         },
-        "pxtrt::mapSetByStringOnly": {
-            name: "_pxt_map_set_by_string",
-            argsFmt: ["T", "T", "S", "T"],
-            value: 0
-        },
     }
 
     let EK = ir.EK;
@@ -1138,106 +1133,22 @@ namespace ts.pxtc {
                 return reject("noContextualType");
             if (contextualType.flags & TypeFlags.Union) {
                 const union = contextualType as UnionType;
-                const accepted: { candidate: ObjectLiteralRecordCandidate; arm: Type }[] = [];
-                for (const arm of union.types || []) {
-                    const candidate = analyzeClosedObjectLiteralForType(node, arm);
-                    if (candidate.eligible)
-                        accepted.push({ candidate, arm });
-                }
-                if (accepted.length == 1)
-                    return accepted[0].candidate;
-                if (accepted.length > 1) {
-                    const compatible = accepted.filter(entry => objectLiteralUnionArmLiteralScore(node, entry.arm) >= 0);
-                    if (compatible.length == 1 && objectLiteralUnionArmLiteralScore(node, compatible[0].arm) > 0)
-                        return compatible[0].candidate;
-                    if (!compatible.length)
-                        return reject("unionNoMatchingArm");
-                    return reject("unionAmbiguous");
-                }
-                return reject("unionNoMatchingArm");
+                const structuralArms = (union.types || []).filter(objectLiteralUnionRecordContextArm);
+                if (structuralArms.length != 1)
+                    return reject(structuralArms.length ? "unionMultipleStructuralArms" : "unionNoStructuralArm");
+
+                const candidate = analyzeClosedObjectLiteralForType(node, structuralArms[0]);
+                return candidate.eligible ? candidate : reject("unionNoMatchingArm");
             }
             return analyzeClosedObjectLiteralForType(node, contextualType);
         }
 
-        function objectLiteralUnionArmLiteralScore(node: ObjectLiteralExpression, contextualType: Type) {
-            let score = 0;
-            for (const prop of node.properties) {
-                if (prop.kind != SK.PropertyAssignment)
-                    continue;
-                const name = objectLiteralPropertyName(prop);
-                if (!name)
-                    continue;
-                const literal = objectLiteralDiscriminantValue((prop as PropertyAssignment).initializer);
-                if (!literal)
-                    continue;
-                const sym = checker.getPropertyOfType(contextualType, name);
-                if (!sym)
-                    return -1;
-                const compatibility = literalValueCompatibility(checker.getTypeOfSymbolAtLocation(sym, prop), literal);
-                if (compatibility < 0)
-                    return -1;
-                score += compatibility;
-            }
-            return score;
-        }
+        function objectLiteralUnionRecordContextArm(contextualType: Type) {
+            if (!isInterfaceType(contextualType))
+                return false;
 
-        function objectLiteralDiscriminantValue(expr: Expression): { kind: string; value: string | number | boolean } {
-            switch (expr.kind) {
-                case SK.StringLiteral:
-                    return { kind: "string", value: (expr as StringLiteral).text };
-                case SK.NumericLiteral:
-                    return { kind: "number", value: parseFloat((expr as NumericLiteral).text) };
-                case SK.TrueKeyword:
-                    return { kind: "boolean", value: true };
-                case SK.FalseKeyword:
-                    return { kind: "boolean", value: false };
-                default:
-                    return null;
-            }
-        }
-
-        function literalValueCompatibility(t: Type, literal: { kind: string; value: string | number | boolean }) {
-            const types = t && (t.flags & TypeFlags.Union) ? (t as UnionType).types : [t];
-            let sawComparableLiteral = false;
-            let sawUnknown = false;
-            for (const subtype of types || []) {
-                if (!subtype || (subtype.flags & (TypeFlags.Undefined | TypeFlags.Null)))
-                    continue;
-                const value = typeLiteralValue(subtype);
-                if (value) {
-                    if (value.kind == literal.kind) {
-                        sawComparableLiteral = true;
-                        if (value.value === literal.value)
-                            return 1;
-                    }
-                } else if (literal.kind == "string" && (subtype.flags & TypeFlags.StringLike)) {
-                    sawUnknown = true;
-                } else if (literal.kind == "number" && (subtype.flags & TypeFlags.NumberLike)) {
-                    sawUnknown = true;
-                } else if (literal.kind == "boolean" && (subtype.flags & TypeFlags.BooleanLike)) {
-                    sawUnknown = true;
-                } else if (subtype.flags & (TypeFlags.Any | TypeFlags.TypeParameter)) {
-                    sawUnknown = true;
-                }
-            }
-            if (sawUnknown || !sawComparableLiteral)
-                return 0;
-            return -1;
-        }
-
-        function typeLiteralValue(t: Type): { kind: string; value: string | number | boolean } {
-            if (t.flags & TypeFlags.StringLiteral)
-                return { kind: "string", value: (t as StringLiteralType).value };
-            if (t.flags & TypeFlags.NumberLiteral)
-                return { kind: "number", value: (t as NumberLiteralType).value };
-            if (t.flags & TypeFlags.BooleanLiteral) {
-                const name = (t as any).intrinsicName;
-                if (name == "true")
-                    return { kind: "boolean", value: true };
-                if (name == "false")
-                    return { kind: "boolean", value: false };
-            }
-            return null;
+            const contextProperties = checker.getPropertiesOfType(contextualType);
+            return !!(contextProperties && contextProperties.length);
         }
 
         function analyzeClosedObjectLiteralForType(node: ObjectLiteralExpression, contextualType: Type) {
@@ -2931,23 +2842,8 @@ ${lbl}: .short 0xffff
             }
 
             if (!indexer && (t.flags & (TypeFlags.Any | TypeFlags.StructuredOrTypeVariable))) {
-                const hasIndexSignature = !!checker.getIndexTypeOfType(t, IndexKind.String) || !!checker.getIndexTypeOfType(t, IndexKind.Number);
-                const mapOnlySet = !!assign && !(t.flags & TypeFlags.Any) && hasIndexSignature;
-                indexer = assign
-                    ? (mapOnlySet ? "pxtrt::mapSetByStringOnly" : "pxtrt::mapSetGeneric")
-                    : "pxtrt::mapGetGeneric"
+                indexer = assign ? "pxtrt::mapSetGeneric" : "pxtrt::mapGetGeneric"
                 stringOk = true
-                traceLowering("emitIndexedAccess.generic", node, [
-                    `op=${assign ? "set" : "get"}`,
-                    `mapOnlySet=${mapOnlySet}`,
-                    `receiverType=${checker.typeToString(t)}`,
-                    `receiverFlags=${t.flags}`,
-                    `receiverAny=${!!(t.flags & TypeFlags.Any)}`,
-                    `receiverStructured=${!!(t.flags & TypeFlags.StructuredOrTypeVariable)}`,
-                    `receiverIndexSignature=${hasIndexSignature}`,
-                    `argumentKind=${kindName(node.argumentExpression.kind)}`,
-                    `argumentText=${shortNodeText(node.argumentExpression)}`
-                ])
             }
 
             if (indexer) {

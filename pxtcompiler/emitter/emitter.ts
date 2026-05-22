@@ -939,6 +939,8 @@ namespace ts.pxtc {
         written?: boolean;
         functionsToDefine?: FunctionDeclaration[];
         recordClassInfo?: ClassInfo;
+        recordClassInfoAmbiguous?: boolean;
+        recordReadFields?: pxt.Map<boolean>;
     }
 
     export class FunctionAddInfo {
@@ -1227,7 +1229,7 @@ namespace ts.pxtc {
             if (expr.kind == SK.Identifier) {
                 const decl = getDecl(expr);
                 if (decl && (decl.kind == SK.VariableDeclaration || decl.kind == SK.Parameter || decl.kind == SK.BindingElement)) {
-                    const info = getVarInfo(decl as VarOrParam).recordClassInfo || null;
+                    const info = availableVarRecordClassInfo(decl as VarOrParam);
                     return objectLiteralRecordClassInfoIsProfitable(info) ? info : null;
                 }
                 return null;
@@ -1241,6 +1243,26 @@ namespace ts.pxtc {
                 }
             }
             return null;
+        }
+
+        function availableVarRecordClassInfo(decl: VarOrParam) {
+            const info = getVarInfo(decl);
+            const recordInfo = info.recordClassInfo || null;
+            if (!recordInfo || decl.kind != SK.Parameter)
+                return recordInfo;
+            if (!bin.finalPass)
+                return null;
+            return recordInfoHasFields(recordInfo, info.recordReadFields) ? recordInfo : null;
+        }
+
+        function recordInfoHasFields(recordInfo: ClassInfo, fields: pxt.Map<boolean>) {
+            if (!fields)
+                return true;
+            for (const field of Object.keys(fields)) {
+                if (!tryGetFieldInfo(recordInfo, field))
+                    return false;
+            }
+            return true;
         }
 
         function noteFunctionRecordReturn(expr: Expression) {
@@ -1257,6 +1279,53 @@ namespace ts.pxtc {
                 info.recordReturnAmbiguous = true;
                 info.recordReturnClassInfo = null;
             }
+        }
+
+        function noteParameterRecordInfo(param: ParameterDeclaration, recordInfo: ClassInfo) {
+            if (!objectLiteralRecords || !param)
+                return;
+            const info = getVarInfo(param);
+            if (info.recordClassInfoAmbiguous)
+                return;
+            if (!recordInfo) {
+                if (info.recordClassInfo) {
+                    info.recordClassInfo = null;
+                    info.recordClassInfoAmbiguous = true;
+                }
+            } else if (!info.recordClassInfo) {
+                info.recordClassInfo = recordInfo;
+            } else if (info.recordClassInfo != recordInfo) {
+                info.recordClassInfo = null;
+                info.recordClassInfoAmbiguous = true;
+            }
+        }
+
+        function emitCallArgument(expr: Expression, param: ParameterDeclaration) {
+            const emitted = emitExpr(expr);
+            const recordInfo = expressionRecordClassInfo(expr);
+            if (param)
+                noteParameterRecordInfo(param, recordInfo);
+            markExpressionRecordInterfaceFieldsNeeded(expr, "callArgument");
+            return emitted;
+        }
+
+        function shouldPropagateCallParameterRecords(decl: EmittableAsCall) {
+            if (!objectLiteralRecords || !decl || decl.kind != SK.FunctionDeclaration)
+                return false;
+            const info = getFunctionInfo(decl as FunctionDeclaration);
+            return !info.usedAsValue;
+        }
+
+        function noteParameterRecordFieldRead(expr: Expression, fieldName: string) {
+            if (!objectLiteralRecords || !expr || expr.kind != SK.Identifier)
+                return;
+            const decl = getDecl(expr);
+            if (!decl || decl.kind != SK.Parameter)
+                return;
+            const info = getVarInfo(decl as ParameterDeclaration);
+            if (!info.recordReadFields)
+                info.recordReadFields = {};
+            info.recordReadFields[fieldName] = true;
         }
 
         function reset() {
@@ -2234,6 +2303,7 @@ ${lbl}: .short 0xffff
             if (decl.kind == SK.EnumMember) {
                 throw userError(9210, lf("Cannot compute enum value"))
             } else if (decl.kind == SK.PropertySignature || decl.kind == SK.PropertyAssignment) {
+                noteParameterRecordFieldRead(node.expression, node.name.text);
                 const recordInfo = expressionRecordClassInfo(node.expression);
                 if (recordInfo) {
                     const recordField = tryGetFieldInfo(recordInfo, node.name.text);
@@ -2703,7 +2773,10 @@ ${lbl}: .short 0xffff
             }
 
             function emitPlain() {
-                let r = mkProcCall(decl, node, args.map((x) => emitEscapedExpression(x, "callArgument")))
+                const params: NodeArray<ParameterDeclaration> = shouldPropagateCallParameterRecords(decl)
+                    ? (decl as FunctionDeclaration).parameters
+                    : undefined;
+                let r = mkProcCall(decl, node, args.map((x, i) => params ? emitCallArgument(x, params[i]) : emitEscapedExpression(x, "callArgument")))
                 let pp = r.data as ir.ProcId
                 if (args[0] && pp.proc && pp.proc.classInfo)
                     pp.isThis = args[0].kind == SK.ThisKeyword

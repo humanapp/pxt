@@ -1032,6 +1032,11 @@ namespace ts.pxtc {
         const objectLiteralRecordShapeCounts: pxt.Map<number> = {};
         let objectLiteralRecordClassNo = 0;
         const objectLiteralRecordShapeThreshold = 3;
+        let objectLiteralRecordProvenanceAnalyzed = false;
+        const objectLiteralRecordProvenanceVars: pxt.Map<ClassInfo> = {};
+        const objectLiteralRecordProvenanceVarUnknown: pxt.Map<boolean> = {};
+        const objectLiteralRecordProvenanceReturns: pxt.Map<ClassInfo> = {};
+        const objectLiteralRecordProvenanceReturnUnknown: pxt.Map<boolean> = {};
         bin.trace = opts.trace;
         bin.loweringTrace = loweringTrace;
         bin.breakpoints = opts.breakpoints;
@@ -1222,6 +1227,9 @@ namespace ts.pxtc {
         function expressionRecordClassInfo(expr: Expression) {
             if (!objectLiteralRecords || !expr)
                 return null;
+            const provenanceInfo = recordProvenanceExprClassInfo(expr);
+            if (provenanceInfo !== undefined)
+                return objectLiteralRecordClassInfoIsProfitable(provenanceInfo) ? provenanceInfo : null;
             if (expr.kind == SK.ObjectLiteralExpression) {
                 const info = pxtInfo(expr).classInfo || null;
                 return objectLiteralRecordClassInfoIsProfitable(info) ? info : null;
@@ -1230,6 +1238,14 @@ namespace ts.pxtc {
                 const decl = getDecl(expr);
                 if (decl && (decl.kind == SK.VariableDeclaration || decl.kind == SK.Parameter || decl.kind == SK.BindingElement)) {
                     const info = availableVarRecordClassInfo(decl as VarOrParam);
+                    return objectLiteralRecordClassInfoIsProfitable(info) ? info : null;
+                }
+                return null;
+            }
+            if (expr.kind == SK.PropertyAccessExpression) {
+                const decl = getDecl(expr);
+                if (decl && decl.kind == SK.PropertyDeclaration) {
+                    const info = availableVarRecordClassInfo(decl as PropertyDeclaration);
                     return objectLiteralRecordClassInfoIsProfitable(info) ? info : null;
                 }
                 return null;
@@ -1263,6 +1279,378 @@ namespace ts.pxtc {
                     return false;
             }
             return true;
+        }
+
+        function clearObjectLiteralRecordProvenance() {
+            for (const key of Object.keys(objectLiteralRecordProvenanceVars))
+                delete objectLiteralRecordProvenanceVars[key];
+            for (const key of Object.keys(objectLiteralRecordProvenanceVarUnknown))
+                delete objectLiteralRecordProvenanceVarUnknown[key];
+            for (const key of Object.keys(objectLiteralRecordProvenanceReturns))
+                delete objectLiteralRecordProvenanceReturns[key];
+            for (const key of Object.keys(objectLiteralRecordProvenanceReturnUnknown))
+                delete objectLiteralRecordProvenanceReturnUnknown[key];
+            objectLiteralRecordProvenanceAnalyzed = false;
+        }
+
+        function recordProvenanceExprClassInfo(expr: Expression): ClassInfo {
+            if (!objectLiteralRecordProvenanceAnalyzed || !bin.finalPass)
+                return undefined;
+            if (expr.kind == SK.Identifier) {
+                const decl = getDecl(expr);
+                if (decl && (decl.kind == SK.VariableDeclaration || decl.kind == SK.Parameter || decl.kind == SK.BindingElement)) {
+                    const key = nodeKey(decl);
+                    if (objectLiteralRecordProvenanceVarUnknown[key])
+                        return null;
+                    if (objectLiteralRecordProvenanceVars.hasOwnProperty(key))
+                        return objectLiteralRecordProvenanceVars[key] || null;
+                }
+            } else if (expr.kind == SK.PropertyAccessExpression) {
+                const decl = getDecl(expr);
+                if (decl && decl.kind == SK.PropertyDeclaration) {
+                    const key = nodeKey(decl);
+                    if (objectLiteralRecordProvenanceVarUnknown[key])
+                        return null;
+                    if (objectLiteralRecordProvenanceVars.hasOwnProperty(key))
+                        return objectLiteralRecordProvenanceVars[key] || null;
+                }
+            } else if (expr.kind == SK.CallExpression) {
+                const decl = getDecl((expr as CallExpression).expression);
+                if (decl && decl.kind == SK.FunctionDeclaration) {
+                    const key = nodeKey(decl);
+                    if (objectLiteralRecordProvenanceReturnUnknown[key])
+                        return null;
+                    if (objectLiteralRecordProvenanceReturns.hasOwnProperty(key))
+                        return objectLiteralRecordProvenanceReturns[key] || null;
+                }
+            }
+            return undefined;
+        }
+
+        function analyzeObjectLiteralRecordProvenance() {
+            clearObjectLiteralRecordProvenance();
+            if (!objectLiteralRecords)
+                return;
+
+            const actions = bin.procs
+                .map(p => p.action)
+                .filter(a => !!a && (a.kind == SK.FunctionDeclaration || a.kind == SK.MethodDeclaration || a.kind == SK.Constructor || a.kind == SK.ArrowFunction || a.kind == SK.FunctionExpression));
+
+            let currentVars: pxt.Map<ClassInfo> = {};
+            let currentVarUnknown: pxt.Map<boolean> = {};
+            let currentReturns: pxt.Map<ClassInfo> = {};
+            let currentReturnUnknown: pxt.Map<boolean> = {};
+
+            function clearMap<T>(map: pxt.Map<T>) {
+                for (const key of Object.keys(map))
+                    delete map[key];
+            }
+
+            function mergeRecordFact(key: string, info: ClassInfo, records: pxt.Map<ClassInfo>, unknown: pxt.Map<boolean>) {
+                if (unknown[key])
+                    return;
+                if (!info) {
+                    delete records[key];
+                    unknown[key] = true;
+                    return;
+                }
+                const existing = records[key];
+                if (!existing) {
+                    records[key] = info;
+                } else if (existing != info) {
+                    delete records[key];
+                    unknown[key] = true;
+                }
+            }
+
+            function setRecordFact(key: string, info: ClassInfo, records: pxt.Map<ClassInfo>, unknown: pxt.Map<boolean>) {
+                if (info)
+                    records[key] = info;
+                else
+                    unknown[key] = true;
+            }
+
+            function sameRecordFacts(a: pxt.Map<ClassInfo>, au: pxt.Map<boolean>, b: pxt.Map<ClassInfo>, bu: pxt.Map<boolean>) {
+                const keys: pxt.Map<boolean> = {};
+                for (const key of Object.keys(a)) keys[key] = true;
+                for (const key of Object.keys(au)) keys[key] = true;
+                for (const key of Object.keys(b)) keys[key] = true;
+                for (const key of Object.keys(bu)) keys[key] = true;
+                for (const key of Object.keys(keys)) {
+                    if (!!au[key] != !!bu[key])
+                        return false;
+                    if ((a[key] || null) != (b[key] || null))
+                        return false;
+                }
+                return true;
+            }
+
+            function copyRecordFacts(from: pxt.Map<ClassInfo>, fromUnknown: pxt.Map<boolean>, to: pxt.Map<ClassInfo>, toUnknown: pxt.Map<boolean>) {
+                clearMap(to);
+                clearMap(toUnknown);
+                for (const key of Object.keys(from))
+                    to[key] = from[key];
+                for (const key of Object.keys(fromUnknown))
+                    toUnknown[key] = fromUnknown[key];
+            }
+
+            function analyzeIteration() {
+                const nextVars: pxt.Map<ClassInfo> = {};
+                const nextVarUnknown: pxt.Map<boolean> = {};
+                const nextReturns: pxt.Map<ClassInfo> = {};
+                const nextReturnUnknown: pxt.Map<boolean> = {};
+
+                function analyzeAction(action: FunctionLikeDeclaration) {
+                    const localVars: pxt.Map<ClassInfo> = {};
+                    const localVarUnknown: pxt.Map<boolean> = {};
+
+                    function localFact(decl: Declaration) {
+                        const key = nodeKey(decl);
+                        if (localVarUnknown[key])
+                            return null;
+                        if (localVars.hasOwnProperty(key))
+                            return localVars[key] || null;
+                        if (currentVarUnknown[key])
+                            return null;
+                        if (currentVars.hasOwnProperty(key))
+                            return currentVars[key] || null;
+                        return null;
+                    }
+
+                    function setLocalFact(decl: Declaration, info: ClassInfo) {
+                        const key = nodeKey(decl);
+                        delete localVars[key];
+                        delete localVarUnknown[key];
+                        setRecordFact(key, info, localVars, localVarUnknown);
+                        setRecordFact(key, info, nextVars, nextVarUnknown);
+                    }
+
+                    function markLocalUnknown(decl: Declaration) {
+                        setLocalFact(decl, null);
+                    }
+
+                    function exprFact(expr: Expression): ClassInfo {
+                        if (!expr)
+                            return null;
+                        switch (expr.kind) {
+                            case SK.ObjectLiteralExpression: {
+                                const candidate = analyzeClosedObjectLiteral(expr as ObjectLiteralExpression, checker.getContextualType(expr));
+                                return candidate.eligible ? getObjectLiteralRecordClassInfo(expr as ObjectLiteralExpression, candidate) : null;
+                            }
+                            case SK.Identifier: {
+                                const decl = getDeclCore(expr);
+                                if (decl && (decl.kind == SK.VariableDeclaration || decl.kind == SK.Parameter || decl.kind == SK.BindingElement))
+                                    return localFact(decl);
+                                return null;
+                            }
+                            case SK.PropertyAccessExpression: {
+                                const decl = getDeclCore(expr);
+                                if (decl && decl.kind == SK.PropertyDeclaration)
+                                    return localFact(decl);
+                                return null;
+                            }
+                            case SK.CallExpression: {
+                                const decl = getDeclCore((expr as CallExpression).expression);
+                                if (decl && decl.kind == SK.FunctionDeclaration && shouldPropagateCallParameterRecords(decl as FunctionDeclaration)) {
+                                    const key = nodeKey(decl);
+                                    if (currentReturnUnknown[key])
+                                        return null;
+                                    return currentReturns[key] || null;
+                                }
+                                return null;
+                            }
+                            case SK.ParenthesizedExpression:
+                                return exprFact((expr as ParenthesizedExpression).expression);
+                            case SK.AsExpression:
+                            case SK.TypeAssertionExpression:
+                                return exprFact((expr as AssertionExpression).expression);
+                            default:
+                                return null;
+                        }
+                    }
+
+                    function invalidateExpression(expr: Expression) {
+                        if (!expr)
+                            return;
+                        if (expr.kind == SK.Identifier) {
+                            const decl = getDeclCore(expr);
+                            if (decl && (decl.kind == SK.VariableDeclaration || decl.kind == SK.Parameter || decl.kind == SK.BindingElement))
+                                markLocalUnknown(decl);
+                        } else if (expr.kind == SK.PropertyAccessExpression) {
+                            const decl = getDeclCore(expr);
+                            if (decl && decl.kind == SK.PropertyDeclaration)
+                                markLocalUnknown(decl);
+                            else
+                                invalidateExpression((expr as PropertyAccessExpression).expression);
+                        } else if (expr.kind == SK.ElementAccessExpression) {
+                            invalidateExpression((expr as ElementAccessExpression).expression);
+                        }
+                    }
+
+                    function walkExpression(expr: Expression) {
+                        if (!expr)
+                            return;
+                        switch (expr.kind) {
+                            case SK.CallExpression: {
+                                const call = expr as CallExpression;
+                                const decl = getDeclCore(call.expression);
+                                if (decl && decl.kind == SK.FunctionDeclaration && shouldPropagateCallParameterRecords(decl as FunctionDeclaration)) {
+                                    const params = (decl as FunctionDeclaration).parameters;
+                                    call.arguments.forEach((arg, i) => {
+                                        if (params[i])
+                                            mergeRecordFact(nodeKey(params[i]), exprFact(arg), nextVars, nextVarUnknown);
+                                        walkExpression(arg);
+                                    });
+                                } else {
+                                    call.arguments.forEach(arg => {
+                                        invalidateExpression(arg);
+                                        walkExpression(arg);
+                                    });
+                                }
+                                return;
+                            }
+                            case SK.BinaryExpression: {
+                                const binExpr = expr as BinaryExpression;
+                                if (binExpr.operatorToken.kind == SK.EqualsToken) {
+                                    if (binExpr.left.kind == SK.Identifier) {
+                                        const decl = getDeclCore(binExpr.left);
+                                        if (decl && (decl.kind == SK.VariableDeclaration || decl.kind == SK.Parameter || decl.kind == SK.BindingElement))
+                                            setLocalFact(decl, exprFact(binExpr.right));
+                                    } else if (binExpr.left.kind == SK.PropertyAccessExpression) {
+                                        const decl = getDeclCore(binExpr.left);
+                                        if (decl && decl.kind == SK.PropertyDeclaration)
+                                            setLocalFact(decl, exprFact(binExpr.right));
+                                        else if (decl && (decl.kind == SK.PropertySignature || decl.kind == SK.PropertyAssignment))
+                                            walkExpression((binExpr.left as PropertyAccessExpression).expression);
+                                        else
+                                            invalidateExpression(binExpr.left);
+                                    } else {
+                                        invalidateExpression(binExpr.left);
+                                    }
+                                    walkExpression(binExpr.right);
+                                } else {
+                                    walkExpression(binExpr.left);
+                                    walkExpression(binExpr.right);
+                                }
+                                return;
+                            }
+                            case SK.ElementAccessExpression: {
+                                const el = expr as ElementAccessExpression;
+                                invalidateExpression(el.expression);
+                                walkExpression(el.expression);
+                                walkExpression(el.argumentExpression);
+                                return;
+                            }
+                            case SK.ArrayLiteralExpression:
+                                (expr as ArrayLiteralExpression).elements.forEach(elt => {
+                                    invalidateExpression(elt);
+                                    walkExpression(elt);
+                                });
+                                return;
+                            case SK.ObjectLiteralExpression:
+                                (expr as ObjectLiteralExpression).properties.forEach(prop => {
+                                    if (prop.kind == SK.PropertyAssignment)
+                                        walkExpression((prop as PropertyAssignment).initializer);
+                                    else if (prop.kind == SK.SpreadAssignment) {
+                                        invalidateExpression((prop as SpreadAssignment).expression);
+                                        walkExpression((prop as SpreadAssignment).expression);
+                                    }
+                                });
+                                return;
+                            case SK.PropertyAccessExpression:
+                                walkExpression((expr as PropertyAccessExpression).expression);
+                                return;
+                            case SK.ParenthesizedExpression:
+                                walkExpression((expr as ParenthesizedExpression).expression);
+                                return;
+                            case SK.AsExpression:
+                            case SK.TypeAssertionExpression:
+                                walkExpression((expr as AssertionExpression).expression);
+                                return;
+                            case SK.ArrowFunction:
+                            case SK.FunctionExpression:
+                                return;
+                            default:
+                                ts.forEachChild(expr, child => {
+                                    if ((child as Node).kind)
+                                        walkNode(child as Node);
+                                });
+                        }
+                    }
+
+                    function walkNode(node: Node) {
+                        if (!node)
+                            return;
+                        switch (node.kind) {
+                            case SK.VariableDeclaration: {
+                                const decl = node as VariableDeclaration;
+                                setLocalFact(decl, decl.initializer ? exprFact(decl.initializer) : null);
+                                walkExpression(decl.initializer);
+                                return;
+                            }
+                            case SK.PropertyDeclaration: {
+                                const decl = node as PropertyDeclaration;
+                                if (decl.initializer) {
+                                    setLocalFact(decl, exprFact(decl.initializer));
+                                    walkExpression(decl.initializer);
+                                }
+                                return;
+                            }
+                            case SK.ReturnStatement: {
+                                const ret = node as ReturnStatement;
+                                mergeRecordFact(nodeKey(action), ret.expression ? exprFact(ret.expression) : null, nextReturns, nextReturnUnknown);
+                                walkExpression(ret.expression);
+                                return;
+                            }
+                            case SK.ExpressionStatement:
+                                walkExpression((node as ExpressionStatement).expression);
+                                return;
+                            case SK.ArrowFunction:
+                            case SK.FunctionExpression:
+                                return;
+                            default:
+                                ts.forEachChild(node, child => walkNode(child as Node));
+                        }
+                    }
+
+                    getParameters(action).forEach(param => {
+                        const key = nodeKey(param);
+                        if (currentVarUnknown[key])
+                            markLocalUnknown(param);
+                        else if (currentVars.hasOwnProperty(key))
+                            setLocalFact(param, currentVars[key]);
+                    });
+
+                    getFunctionInfo(action).capturedVars.forEach(markLocalUnknown);
+
+                    if (action.body) {
+                        if (action.body.kind == SK.Block)
+                            walkNode(action.body);
+                        else
+                            mergeRecordFact(nodeKey(action), exprFact(action.body as Expression), nextReturns, nextReturnUnknown);
+                    }
+                }
+
+                actions.forEach(analyzeAction);
+
+                const changed =
+                    !sameRecordFacts(currentVars, currentVarUnknown, nextVars, nextVarUnknown) ||
+                    !sameRecordFacts(currentReturns, currentReturnUnknown, nextReturns, nextReturnUnknown);
+                currentVars = nextVars;
+                currentVarUnknown = nextVarUnknown;
+                currentReturns = nextReturns;
+                currentReturnUnknown = nextReturnUnknown;
+                return changed;
+            }
+
+            for (let i = 0; i < 8; ++i) {
+                if (!analyzeIteration())
+                    break;
+            }
+
+            copyRecordFacts(currentVars, currentVarUnknown, objectLiteralRecordProvenanceVars, objectLiteralRecordProvenanceVarUnknown);
+            copyRecordFacts(currentReturns, currentReturnUnknown, objectLiteralRecordProvenanceReturns, objectLiteralRecordProvenanceReturnUnknown);
+            objectLiteralRecordProvenanceAnalyzed = true;
         }
 
         function noteFunctionRecordReturn(expr: Expression) {
@@ -1411,6 +1799,8 @@ namespace ts.pxtc {
             if (fixpointVTables())
                 break
         }
+
+        analyzeObjectLiteralRecordProvenance();
 
         layOutGlobals()
         needsUsingInfo = false

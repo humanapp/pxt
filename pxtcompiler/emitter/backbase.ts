@@ -185,10 +185,29 @@ ${hexLiteralAsm(data)}
         }
 
         public emitHelpers() {
+            this.traceLowering("emitHelpers")
             this.emitLambdaTrampoline()
-            this.emitArrayMethods()
-            this.emitFieldMethods()
+            this.emitUsedArrayMethods()
+            this.emitUsedFieldMethods()
             this.emitBindHelper()
+        }
+
+        private traceLowering(s: string) {
+            if (this.bin.loweringTrace)
+                this.bin.loweringTrace.push("backend." + s)
+        }
+
+        private markThumbHelper(name: string) {
+            switch (name) {
+                case "_pxt_map_get":
+                case "_pxt_map_set":
+                case "_pxt_array_get":
+                case "_pxt_array_set":
+                case "_pxt_buffer_get":
+                case "_pxt_buffer_set":
+                    this.bin.usedThumbHelpers[name] = true
+                    break
+            }
         }
 
         private write = (s: string) => { this.resText += asmline(s); }
@@ -839,6 +858,7 @@ ${baseLabel}_nochk:
 
         private emitIfaceCall(procid: ir.ProcId, numargs: number, getset = "") {
             U.assert(procid.ifaceIndex > 0)
+            this.traceLowering(`emitIfaceCall | ifaceIndex=${procid.ifaceIndex} | numargs=${numargs} | getset=${getset || "call"}`)
             this.write(this.t.emit_int(procid.ifaceIndex, "r1"))
 
             this.emitLabelledHelper("ifacecall" + numargs + "_" + getset, () => {
@@ -1084,6 +1104,7 @@ ${baseLabel}_nochk:
         private alignedCall(name: string, cmt = "", off = 0, saveStack = false) {
             if (U.startsWith(name, "_cmp_") || U.startsWith(name, "_pxt_"))
                 saveStack = false
+            this.markThumbHelper(name)
             this.write(this.t.call_lbl(name, saveStack, this.stackAlignmentNeeded(off)) + cmt)
         }
 
@@ -1144,43 +1165,43 @@ ${baseLabel}_nochk:
             }
         }
 
-        private emitFieldMethods() {
-            for (let op of ["get", "set"]) {
-                this.write(`
+        private emitFieldMethod(op: string) {
+            this.traceLowering(`emitFieldMethod | op=${op}`)
+            this.write(`
                 ${this.helperObject(op)}
                 .section code
                 _pxt_map_${op}:
                 `)
 
-                this.loadVTable("r4")
-                this.checkSubtype(this.builtInClassNo(pxt.BuiltInType.RefMap), ".notmap", "r4")
+            this.loadVTable("r4")
+            this.checkSubtype(this.builtInClassNo(pxt.BuiltInType.RefMap), ".notmap", "r4")
 
-                this.write(this.t.callCPPPush(op == "set" ? "pxtrt::mapSetByString" : "pxtrt::mapGetByString"))
-                this.write(".notmap:")
+            this.write(this.t.callCPPPush(op == "set" ? "pxtrt::mapSetByString" : "pxtrt::mapGetByString"))
+            this.write(".notmap:")
 
-                let numargs = op == "set" ? 2 : 1
-                let hasAlign = false
+            let numargs = op == "set" ? 2 : 1
+            let hasAlign = false
 
-                this.write("mov r4, r3 ; save VT")
+            this.write("mov r4, r3 ; save VT")
 
-                if (op == "set") {
-                    if (target.stackAlign) {
-                        hasAlign = true
-                        this.write("push {lr} ; align")
-                    }
-                    this.write(`
+            if (op == "set") {
+                if (target.stackAlign) {
+                    hasAlign = true
+                    this.write("push {lr} ; align")
+                }
+                this.write(`
                             push {r0, r2, lr}
                             mov r0, r1
                         `)
 
-                } else {
-                    this.write(`
+            } else {
+                this.write(`
                             push {r0, lr}
                             mov r0, r1
                         `)
-                }
+            }
 
-                this.write(`
+            this.write(`
                     bl pxtrt::lookupMapKey
                     mov r1, r0 ; put key index in r1
                     ldr r0, [sp, #0] ; restore obj pointer
@@ -1189,13 +1210,12 @@ ${baseLabel}_nochk:
                 `)
 
 
-                this.write(this.t.pop_locals(numargs + (hasAlign ? 1 : 0)))
+            this.write(this.t.pop_locals(numargs + (hasAlign ? 1 : 0)))
 
-                this.write("pop {pc}")
+            this.write("pop {pc}")
 
-                this.write(".dowork:")
-                this.ifaceCallCore(numargs, op, true)
-            }
+            this.write(".dowork:")
+            this.ifaceCallCore(numargs, op, true)
         }
 
         private emitArrayMethod(op: string, isBuffer: boolean) {
@@ -1289,6 +1309,22 @@ ${baseLabel}_nochk:
             for (let op of ["get", "set"]) {
                 this.emitArrayMethod(op, true)
                 this.emitArrayMethod(op, false)
+            }
+        }
+
+        private emitUsedArrayMethods() {
+            for (let op of ["get", "set"]) {
+                if (this.bin.usedThumbHelpers[`_pxt_buffer_${op}`])
+                    this.emitArrayMethod(op, true)
+                if (this.bin.usedThumbHelpers[`_pxt_array_${op}`])
+                    this.emitArrayMethod(op, false)
+            }
+        }
+
+        private emitUsedFieldMethods() {
+            for (let op of ["get", "set"]) {
+                if (this.bin.usedThumbHelpers[`_pxt_map_${op}`])
+                    this.emitFieldMethod(op)
             }
         }
 

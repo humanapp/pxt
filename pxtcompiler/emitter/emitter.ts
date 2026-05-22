@@ -188,6 +188,14 @@ namespace ts.pxtc {
     export interface FieldWithAddInfo extends NamedDeclaration {
     }
 
+    interface ObjectLiteralRecordCandidate {
+        eligible: boolean;
+        reason: string;
+        fields: string[];
+        fieldDecls: pxt.Map<FieldWithAddInfo>;
+        shapeKey: string;
+    }
+
     type TemplateLiteralFragment = TemplateHead | TemplateMiddle | TemplateTail;
     export type EmittableAsCall = FunctionLikeDeclaration | SignatureDeclaration | ObjectLiteralElementLike | PropertySignature | ModuleDeclaration
         | ParameterDeclaration | PropertyDeclaration;
@@ -544,6 +552,7 @@ namespace ts.pxtc {
         itable?: ITableEntry[];
         ctor?: ir.Procedure;
         toStringMethod?: ir.Procedure;
+        recordShapeKey?: string;
 
         constructor(public id: string, public decl: ClassDeclaration) {
             this.attrs = parseComments(decl)
@@ -928,6 +937,7 @@ namespace ts.pxtc {
         captured?: boolean;
         written?: boolean;
         functionsToDefine?: FunctionDeclaration[];
+        recordClassInfo?: ClassInfo;
     }
 
     export class FunctionAddInfo {
@@ -942,6 +952,8 @@ namespace ts.pxtc {
         usedAsValue?: boolean;
         usedAsIface?: boolean;
         alreadyEmitted?: boolean;
+        recordReturnClassInfo?: ClassInfo;
+        recordReturnAmbiguous?: boolean;
 
         constructor(public decl: EmittableAsCall) { }
 
@@ -1011,10 +1023,218 @@ namespace ts.pxtc {
 
         let bin = new Binary()
         let proc: ir.Procedure;
+        const loweringTrace = (opts.target.switches as any).loweringTrace ? [] as string[] : undefined;
+        const objectLiteralRecords = !!(opts.target.switches as any).objectLiteralRecords;
+        const objectLiteralRecordClassInfos: pxt.Map<ClassInfo> = {};
+        const objectLiteralRecordShapeCounts: pxt.Map<number> = {};
+        let objectLiteralRecordClassNo = 0;
+        const objectLiteralRecordShapeThreshold = 3;
         bin.trace = opts.trace;
+        bin.loweringTrace = loweringTrace;
         bin.breakpoints = opts.breakpoints;
         bin.name = opts.name;
         bin.target = opts.target;
+
+        function traceLowering(label: string, node?: Node, details?: string[]) {
+            if (!loweringTrace || !bin.finalPass)
+                return;
+
+            const parts = [label];
+            if (node) {
+                const loc = nodeLocationInfo(node);
+                parts.push(`${loc.fileName}:${loc.line + 1}:${loc.column + 1}`);
+                parts.push(`text=${shortNodeText(node)}`);
+            }
+            if (details) {
+                for (const detail of details) {
+                    if (detail)
+                        parts.push(detail);
+                }
+            }
+            loweringTrace.push(parts.join(" | "));
+        }
+
+        function shortNodeText(node: Node) {
+            let text = "";
+            try {
+                text = node.getText();
+            } catch { }
+            text = text.replace(/\s+/g, " ");
+            return text.length > 120 ? text.slice(0, 117) + "..." : text;
+        }
+
+        function kindName(kind: SyntaxKind) {
+            return (SyntaxKind as any)[kind] || kind + "";
+        }
+
+        function declName(decl: Declaration) {
+            if (!decl)
+                return "";
+            try {
+                return getName(decl) || "";
+            } catch {
+                return "";
+            }
+        }
+
+        function typeText(t: Type) {
+            if (!t)
+                return "";
+            try {
+                return checker.typeToString(t);
+            } catch {
+                return "";
+            }
+        }
+
+        function objectLiteralPropertyName(p: ObjectLiteralElementLike) {
+            if (p.kind == SK.SpreadAssignment)
+                return undefined;
+            const name = (p as PropertyAssignment | ShorthandPropertyAssignment | MethodDeclaration | AccessorDeclaration).name;
+            if (!name || name.kind == SK.ComputedPropertyName)
+                return undefined;
+            if (name.kind == SK.Identifier || name.kind == SK.StringLiteral || name.kind == SK.NumericLiteral)
+                return (name as Identifier | StringLiteral | NumericLiteral).text;
+            return undefined;
+        }
+
+        function objectLiteralRecordShapeKey(fields: string[]) {
+            const keyFields = fields.slice(0);
+            keyFields.sort(U.strcmp);
+            return keyFields.join("\n");
+        }
+
+        function objectLiteralRecordShapeIsProfitable(shapeKey: string) {
+            return bin.finalPass && (objectLiteralRecordShapeCounts[shapeKey] || 0) >= objectLiteralRecordShapeThreshold;
+        }
+
+        function objectLiteralRecordClassInfoIsProfitable(info: ClassInfo) {
+            return !!info && (!info.recordShapeKey || !bin.finalPass || objectLiteralRecordShapeCount(info) >= objectLiteralRecordShapeThreshold);
+        }
+
+        function objectLiteralRecordShapeCount(info: ClassInfo) {
+            return info && info.recordShapeKey ? objectLiteralRecordShapeCounts[info.recordShapeKey] || 0 : 0;
+        }
+
+        function analyzeClosedObjectLiteral(node: ObjectLiteralExpression, contextualType: Type) {
+            const fields: string[] = [];
+            const fieldDecls: pxt.Map<FieldWithAddInfo> = {};
+            const reject = (reason: string) => ({ eligible: false, reason, fields, fieldDecls, shapeKey: "" });
+
+            if (!contextualType)
+                return reject("noContextualType");
+            if (!isInterfaceType(contextualType))
+                return reject("contextualTypeNotStructural");
+
+            const contextProperties = checker.getPropertiesOfType(contextualType);
+            if (!contextProperties || !contextProperties.length)
+                return reject("noContextualProperties");
+
+            const contextByName: pxt.Map<Symbol> = {};
+            for (const prop of contextProperties) {
+                contextByName[prop.name] = prop;
+            }
+
+            const seen: pxt.Map<boolean> = {};
+            for (const prop of node.properties) {
+                if (prop.kind != SK.PropertyAssignment && prop.kind != SK.ShorthandPropertyAssignment)
+                    return reject("unsupportedPropertyKind:" + kindName(prop.kind));
+                if ((prop as PropertyAssignment | ShorthandPropertyAssignment).questionToken)
+                    return reject("optionalLiteralProperty");
+
+                const name = objectLiteralPropertyName(prop);
+                if (!name)
+                    return reject("computedOrUnsupportedName");
+                if (prop.name.kind != SK.Identifier)
+                    return reject("unsupportedRecordFieldName:" + name);
+                if (seen[name])
+                    return reject("duplicateProperty:" + name);
+                if (!U.lookup(contextByName, name))
+                    return reject("extraProperty:" + name);
+
+                seen[name] = true;
+                fields.push(name);
+                fieldDecls[name] = prop as any;
+            }
+
+            for (const prop of contextProperties) {
+                if (!seen[prop.name] && !(prop.flags & SymbolFlags.Optional))
+                    return reject("missingProperty:" + prop.name);
+            }
+            if (!fields.length)
+                return reject("noRecordFields");
+
+            return { eligible: true, reason: "accepted", fields, fieldDecls, shapeKey: objectLiteralRecordShapeKey(fields) };
+        }
+
+        function getObjectLiteralRecordClassInfo(node: ObjectLiteralExpression, candidate: ObjectLiteralRecordCandidate) {
+            const key = candidate.shapeKey;
+            let info = objectLiteralRecordClassInfos[key];
+            if (!info) {
+                info = new ClassInfo("ObjectLiteralRecord__S" + objectLiteralRecordClassNo++, node as any);
+                info.recordShapeKey = key;
+                info.allfields = candidate.fields.map(field => candidate.fieldDecls[field]);
+                objectLiteralRecordClassInfos[key] = info;
+            }
+            pxtInfo(node).classInfo = info;
+            return info;
+        }
+
+        function markProfitableObjectLiteralRecordClasses() {
+            for (const key of Object.keys(objectLiteralRecordClassInfos)) {
+                if ((objectLiteralRecordShapeCounts[key] || 0) >= objectLiteralRecordShapeThreshold)
+                    markObjectLiteralRecordVTableUsed(objectLiteralRecordClassInfos[key]);
+            }
+        }
+
+        function markObjectLiteralRecordVTableUsed(info: ClassInfo) {
+            if (info.isUsed)
+                return;
+            pxtInfo(info.decl).flags |= PxtNodeFlags.IsUsed;
+            bin.usedClassInfos.push(info);
+        }
+
+        function expressionRecordClassInfo(expr: Expression) {
+            if (!objectLiteralRecords || !expr)
+                return null;
+            if (expr.kind == SK.ObjectLiteralExpression) {
+                const info = pxtInfo(expr).classInfo || null;
+                return objectLiteralRecordClassInfoIsProfitable(info) ? info : null;
+            }
+            if (expr.kind == SK.Identifier) {
+                const decl = getDecl(expr);
+                if (decl && (decl.kind == SK.VariableDeclaration || decl.kind == SK.Parameter || decl.kind == SK.BindingElement)) {
+                    const info = getVarInfo(decl as VarOrParam).recordClassInfo || null;
+                    return objectLiteralRecordClassInfoIsProfitable(info) ? info : null;
+                }
+                return null;
+            }
+            if (expr.kind == SK.CallExpression) {
+                const decl = getDecl((expr as CallExpression).expression);
+                if (decl && decl.kind == SK.FunctionDeclaration) {
+                    const info = getFunctionInfo(decl as FunctionDeclaration);
+                    if (!info.recordReturnAmbiguous)
+                        return objectLiteralRecordClassInfoIsProfitable(info.recordReturnClassInfo) ? info.recordReturnClassInfo : null;
+                }
+            }
+            return null;
+        }
+
+        function noteFunctionRecordReturn(expr: Expression) {
+            if (!objectLiteralRecords || !proc || !proc.action)
+                return;
+            const info = getFunctionInfo(proc.action as FunctionLikeDeclaration);
+            const recordInfo = expressionRecordClassInfo(expr);
+            if (!recordInfo) {
+                info.recordReturnAmbiguous = true;
+                info.recordReturnClassInfo = null;
+            } else if (!info.recordReturnClassInfo) {
+                info.recordReturnClassInfo = recordInfo;
+            } else if (info.recordReturnClassInfo != recordInfo) {
+                info.recordReturnAmbiguous = true;
+                info.recordReturnClassInfo = null;
+            }
+        }
 
         function reset() {
             bin.reset()
@@ -1095,6 +1315,7 @@ namespace ts.pxtc {
 
         for (; ;) {
             flushWorkQueue()
+            markProfitableObjectLiteralRecordClasses()
             if (fixpointVTables())
                 break
         }
@@ -1148,6 +1369,9 @@ namespace ts.pxtc {
 
         if (compilerHooks.postBinary)
             compilerHooks.postBinary(program, opts, res)
+
+        if (loweringTrace)
+            res.outfiles["lowering-trace.txt"] = loweringTrace.join("\n") + "\n";
 
         return {
             diagnostics: resDiags,
@@ -1847,7 +2071,60 @@ ${lbl}: .short 0xffff
                 proc.emitExpr(ir.rtcall("langsupp::ignore", [coll], 1))
             return coll
         }
+        function emitObjectLiteralRecord(node: ObjectLiteralExpression, candidate: ObjectLiteralRecordCandidate) {
+            const info = getObjectLiteralRecordClassInfo(node, candidate);
+            markVTableUsed(info);
+
+            const lbl = info.id + "_VT";
+            const expr = ir.shared(ir.rtcall("pxt::mkClassInstance", [ir.ptrlit(lbl, lbl)]));
+
+            for (const field of candidate.fields) {
+                const prop = candidate.fieldDecls[field] as PropertyAssignment | ShorthandPropertyAssignment;
+                let init: ir.Expr;
+                if (prop.kind == SK.ShorthandPropertyAssignment) {
+                    const vsym = checker.getShorthandAssignmentValueSymbol(prop);
+                    const vname: Identifier = vsym && vsym.valueDeclaration && (vsym.valueDeclaration as any).name;
+                    if (vname && vname.kind == SK.Identifier)
+                        init = emitIdentifier(vname);
+                    else
+                        throw unhandled(prop);
+                } else {
+                    init = emitExpr(prop.initializer);
+                }
+
+                const targetExpr = ir.op(EK.FieldAccess, [expr], fieldIndexCore(info, getFieldInfo(info, field), false));
+                proc.emitExpr(ir.op(EK.Store, [targetExpr, init]));
+            }
+
+            return expr;
+        }
         function emitObjectLiteral(node: ObjectLiteralExpression) {
+            const contextualType = checker.getContextualType(node);
+            const recordCandidate = analyzeClosedObjectLiteral(node, contextualType);
+            traceLowering("emitObjectLiteral.map", node, [
+                `type=${typeText(typeOf(node))}`,
+                `contextualType=${typeText(contextualType)}`,
+                `properties=${node.properties.map(p => objectLiteralPropertyName(p) || "").join(",")}`,
+                `native=${!!target.isNative}`
+            ]);
+            traceLowering("objectLiteralRecordCandidate", node, [
+                recordCandidate.eligible ? "accepted" : "rejected",
+                `reason=${recordCandidate.reason}`,
+                `contextualType=${typeText(contextualType)}`,
+                `fields=${recordCandidate.fields.join(",")}`
+            ]);
+            if (objectLiteralRecords && recordCandidate.eligible && !bin.finalPass) {
+                objectLiteralRecordShapeCounts[recordCandidate.shapeKey] = (objectLiteralRecordShapeCounts[recordCandidate.shapeKey] || 0) + 1;
+                getObjectLiteralRecordClassInfo(node, recordCandidate);
+            }
+            if (objectLiteralRecords && recordCandidate.eligible && objectLiteralRecordShapeIsProfitable(recordCandidate.shapeKey)) {
+                traceLowering("emitObjectLiteral.record", node, [
+                    `contextualType=${typeText(contextualType)}`,
+                    `fields=${recordCandidate.fields.join(",")}`,
+                    `shapeCount=${objectLiteralRecordShapeCounts[recordCandidate.shapeKey] || 0}`
+                ]);
+                return emitObjectLiteralRecord(node, recordCandidate);
+            }
             let expr = ir.shared(ir.rtcall("pxtrt::mkMap", []))
             node.properties.forEach((p: PropertyAssignment | ShorthandPropertyAssignment) => {
                 assert(!p.questionToken) // should be disallowed by TS grammar checker
@@ -1912,6 +2189,12 @@ ${lbl}: .short 0xffff
         function emitComputedPropertyName(node: ComputedPropertyName) { }
         function emitPropertyAccess(node: PropertyAccessExpression): ir.Expr {
             let decl = getDecl(node);
+            traceLowering("emitPropertyAccess", node, [
+                `declKind=${decl ? kindName(decl.kind) : ""}`,
+                `declName=${declName(decl)}`,
+                `receiverType=${typeText(typeOf(node.expression))}`,
+                `valueType=${typeText(typeOf(node))}`
+            ]);
 
             const fold = constantFoldDecl(decl)
             if (fold)
@@ -1926,6 +2209,27 @@ ${lbl}: .short 0xffff
             if (decl.kind == SK.EnumMember) {
                 throw userError(9210, lf("Cannot compute enum value"))
             } else if (decl.kind == SK.PropertySignature || decl.kind == SK.PropertyAssignment) {
+                const recordInfo = expressionRecordClassInfo(node.expression);
+                if (recordInfo) {
+                    const recordField = tryGetFieldInfo(recordInfo, node.name.text);
+                    if (recordField) {
+                        traceLowering("emitPropertyAccess.recordFieldAccess", node, [
+                            `declKind=${kindName(decl.kind)}`,
+                            `declName=${declName(decl)}`,
+                            `record=${recordInfo.id}`
+                        ]);
+                        return ir.op(EK.FieldAccess, [emitExpr(node.expression)], fieldIndexCore(recordInfo, recordField, false));
+                    }
+                    traceLowering("emitPropertyAccess.recordFieldMissing", node, [
+                        `declKind=${kindName(decl.kind)}`,
+                        `declName=${declName(decl)}`,
+                        `record=${recordInfo.id}`
+                    ]);
+                }
+                traceLowering("emitPropertyAccess.propertyCall", node, [
+                    `declKind=${kindName(decl.kind)}`,
+                    `declName=${declName(decl)}`
+                ]);
                 return emitCallCore(node, node, [], null, decl as any, node.expression)
             } else if (decl.kind == SK.PropertyDeclaration || decl.kind == SK.Parameter) {
                 if (isStatic(decl)) {
@@ -1933,6 +2237,10 @@ ${lbl}: .short 0xffff
                 }
                 if (isSlowField(decl)) {
                     // treat as interface call
+                    traceLowering("emitPropertyAccess.slowFieldCall", node, [
+                        `declKind=${kindName(decl.kind)}`,
+                        `declName=${declName(decl)}`
+                    ]);
                     return emitCallCore(node, node, [], null, decl as any, node.expression)
                 } else {
                     let idx = fieldIndex(node)
@@ -1942,6 +2250,10 @@ ${lbl}: .short 0xffff
                         // Reading a shimmed property
                         return emitShim(fld, decl, [node.expression])
                     } else {
+                        traceLowering("emitPropertyAccess.fieldAccess", node, [
+                            `declKind=${kindName(decl.kind)}`,
+                            `declName=${declName(decl)}`
+                        ]);
                         return ir.op(EK.FieldAccess, [emitExpr(node.expression)], idx)
                     }
                 }
@@ -2413,9 +2725,15 @@ ${lbl}: .short 0xffff
                     // TODO in VT accessor/field/method -> different
                     U.assert(funcExpr.kind == SK.PropertyAccessExpression);
                     const fieldName = (funcExpr as PropertyAccessExpression).name.text
+                    const ifaceIndex = getIfaceMemberId(fieldName, true);
+                    traceLowering("emitCallCore.dynamicIfaceCall", node, [
+                        `field=${fieldName}`,
+                        `ifaceIndex=${ifaceIndex}`,
+                        `noArgs=${!!noArgs}`
+                    ]);
                     // completely dynamic dispatch
                     return mkMethodCall(args.map((x) => emitExpr(x)), {
-                        ifaceIndex: getIfaceMemberId(fieldName, true),
+                        ifaceIndex,
                         callLocationIndex: markCallLocation(node),
                         noArgs
                     })
@@ -2480,8 +2798,18 @@ ${lbl}: .short 0xffff
                     markFunctionUsed(decl)
                     return emitPlain();
                 } else if (needsVCall || target.switches.slowMethods || !forceMethod) {
+                    const ifaceIndex = getIfaceMemberId(getName(decl), true);
+                    traceLowering("emitCallCore.ifaceCall", node, [
+                        `declKind=${kindName(decl.kind)}`,
+                        `declName=${declName(decl)}`,
+                        `ifaceIndex=${ifaceIndex}`,
+                        `needsVCall=${!!needsVCall}`,
+                        `forceMethod=${!!forceMethod}`,
+                        `noArgs=${!!noArgs}`,
+                        `isSet=${noArgs && args.length == 2}`
+                    ]);
                     return mkMethodCall(args.map((x) => emitExpr(x)), {
-                        ifaceIndex: getIfaceMemberId(getName(decl), true),
+                        ifaceIndex,
                         isSet: noArgs && args.length == 2,
                         callLocationIndex: markCallLocation(node),
                         noArgs
@@ -2611,6 +2939,8 @@ ${lbl}: .short 0xffff
         }
 
         function getCtor(decl: ClassDeclaration) {
+            if (!decl.members)
+                return null;
             return decl.members.filter(m => m.kind == SK.Constructor)[0] as ConstructorDeclaration
         }
 
@@ -3340,6 +3670,9 @@ ${lbl}: .short 0xffff
                 userError(9224, lf("field {0} not found", fieldName))
             }
             return field;
+        }
+        function tryGetFieldInfo(info: ClassInfo, fieldName: string) {
+            return info.allfields.filter(f => (<Identifier>f.name).text == fieldName)[0] || null
         }
 
         function emitStore(trg: Expression, src: Expression, checkAssign: boolean = false) {
@@ -4390,8 +4723,10 @@ ${lbl}: .short 0xffff
             let v: ir.Expr = null
             if (node.expression) {
                 v = emitExpr(node.expression)
+                noteFunctionRecordReturn(node.expression)
             } else if (funcHasReturn(proc.action)) {
                 v = emitLit(undefined) // == return undefined
+                noteFunctionRecordReturn(null)
             }
             let numTry = 0
             for (let p: Node = node; p; p = p.parent) {
@@ -4629,7 +4964,10 @@ ${lbl}: .short 0xffff
                     }
                 }
                 typeCheckSubtoSup(node.initializer, node)
-                proc.emitExpr(loc.storeByRef(emitExpr(node.initializer)))
+                const initializerExpr = emitExpr(node.initializer);
+                const initializerRecordInfo = expressionRecordClassInfo(node.initializer);
+                proc.emitExpr(loc.storeByRef(initializerExpr))
+                getVarInfo(node).recordClassInfo = initializerRecordInfo;
                 currJres = null
                 proc.stackEmpty();
             } else if (inLoop(node)) {
@@ -5048,6 +5386,7 @@ ${lbl}: .short 0xffff
         writeFile = (fn: string, cont: string) => { };
 
         trace: boolean;
+        loweringTrace: string[];
         breakpoints: boolean;
         name: string;
 
@@ -5070,6 +5409,7 @@ ${lbl}: .short 0xffff
         doubles: pxt.Map<string> = {};
         otherLiterals: string[] = [];
         codeHelpers: pxt.Map<string> = {};
+        usedThumbHelpers: pxt.Map<boolean> = {};
         lblNo = 0;
 
         reset() {
@@ -5079,6 +5419,7 @@ ${lbl}: .short 0xffff
             this.hexlits = {}
             this.doubles = {}
             this.numStmts = 0
+            this.usedThumbHelpers = {}
         }
 
         getTitle() {

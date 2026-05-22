@@ -1037,7 +1037,6 @@ namespace ts.pxtc {
         const objectLiteralRecordProvenanceVarUnknown: pxt.Map<boolean> = {};
         const objectLiteralRecordProvenanceReturns: pxt.Map<ClassInfo> = {};
         const objectLiteralRecordProvenanceReturnUnknown: pxt.Map<boolean> = {};
-        const objectLiteralRecordProvenanceReturnEscapes: pxt.Map<boolean> = {};
         bin.trace = opts.trace;
         bin.loweringTrace = loweringTrace;
         bin.breakpoints = opts.breakpoints;
@@ -1323,9 +1322,35 @@ namespace ts.pxtc {
         }
 
         function markExpressionRecordInterfaceFieldsNeeded(expr: Expression, reason: string) {
+            if (!objectLiteralRecords || !expr)
+                return;
             const info = expressionRecordClassInfo(expr);
             if (info)
                 markObjectLiteralRecordInterfaceFieldsNeeded(info, expr, reason);
+            switch (expr.kind) {
+                case SK.ObjectLiteralExpression:
+                    (expr as ObjectLiteralExpression).properties.forEach(prop => {
+                        if (prop.kind == SK.PropertyAssignment)
+                            markExpressionRecordInterfaceFieldsNeeded((prop as PropertyAssignment).initializer, reason);
+                        else if (prop.kind == SK.SpreadAssignment)
+                            markExpressionRecordInterfaceFieldsNeeded((prop as SpreadAssignment).expression, reason);
+                    });
+                    break;
+                case SK.ArrayLiteralExpression:
+                    (expr as ArrayLiteralExpression).elements.forEach(elt => markExpressionRecordInterfaceFieldsNeeded(elt, reason));
+                    break;
+                case SK.ParenthesizedExpression:
+                    markExpressionRecordInterfaceFieldsNeeded((expr as ParenthesizedExpression).expression, reason);
+                    break;
+                case SK.AsExpression:
+                case SK.TypeAssertionExpression:
+                    markExpressionRecordInterfaceFieldsNeeded((expr as AssertionExpression).expression, reason);
+                    break;
+                case SK.ConditionalExpression:
+                    markExpressionRecordInterfaceFieldsNeeded((expr as ConditionalExpression).whenTrue, reason);
+                    markExpressionRecordInterfaceFieldsNeeded((expr as ConditionalExpression).whenFalse, reason);
+                    break;
+            }
         }
 
         function emitEscapedExpression(expr: Expression, reason: string) {
@@ -1400,8 +1425,6 @@ namespace ts.pxtc {
                 delete objectLiteralRecordProvenanceReturns[key];
             for (const key of Object.keys(objectLiteralRecordProvenanceReturnUnknown))
                 delete objectLiteralRecordProvenanceReturnUnknown[key];
-            for (const key of Object.keys(objectLiteralRecordProvenanceReturnEscapes))
-                delete objectLiteralRecordProvenanceReturnEscapes[key];
             objectLiteralRecordProvenanceAnalyzed = false;
         }
 
@@ -1452,7 +1475,6 @@ namespace ts.pxtc {
             let currentVarUnknown: pxt.Map<boolean> = {};
             let currentReturns: pxt.Map<ClassInfo> = {};
             let currentReturnUnknown: pxt.Map<boolean> = {};
-            let currentReturnEscapes: pxt.Map<boolean> = {};
 
             function clearMap<T>(map: pxt.Map<T>) {
                 for (const key of Object.keys(map))
@@ -1507,25 +1529,11 @@ namespace ts.pxtc {
                     toUnknown[key] = fromUnknown[key];
             }
 
-            function markReturnEscape(expr: Expression, escapes: pxt.Map<boolean>) {
-                if (!expr)
-                    return;
-                if (expr.kind == SK.CallExpression) {
-                    const decl = getDeclCore((expr as CallExpression).expression);
-                    if (decl && decl.kind == SK.FunctionDeclaration) {
-                        const key = nodeKey(decl);
-                        if (currentReturns[key])
-                            escapes[key] = true;
-                    }
-                }
-            }
-
             function analyzeIteration() {
                 const nextVars: pxt.Map<ClassInfo> = {};
                 const nextVarUnknown: pxt.Map<boolean> = {};
                 const nextReturns: pxt.Map<ClassInfo> = {};
                 const nextReturnUnknown: pxt.Map<boolean> = {};
-                const nextReturnEscapes: pxt.Map<boolean> = {};
 
                 function analyzeAction(action: FunctionLikeDeclaration) {
                     const localVars: pxt.Map<ClassInfo> = {};
@@ -1611,8 +1619,6 @@ namespace ts.pxtc {
                                 invalidateExpression((expr as PropertyAccessExpression).expression);
                         } else if (expr.kind == SK.ElementAccessExpression) {
                             invalidateExpression((expr as ElementAccessExpression).expression);
-                        } else if (expr.kind == SK.CallExpression) {
-                            markReturnEscape(expr, nextReturnEscapes);
                         }
                     }
 
@@ -1764,14 +1770,11 @@ namespace ts.pxtc {
 
                 const changed =
                     !sameRecordFacts(currentVars, currentVarUnknown, nextVars, nextVarUnknown) ||
-                    !sameRecordFacts(currentReturns, currentReturnUnknown, nextReturns, nextReturnUnknown) ||
-                    Object.keys(currentReturnEscapes).some(key => !nextReturnEscapes[key]) ||
-                    Object.keys(nextReturnEscapes).some(key => !currentReturnEscapes[key]);
+                    !sameRecordFacts(currentReturns, currentReturnUnknown, nextReturns, nextReturnUnknown);
                 currentVars = nextVars;
                 currentVarUnknown = nextVarUnknown;
                 currentReturns = nextReturns;
                 currentReturnUnknown = nextReturnUnknown;
-                currentReturnEscapes = nextReturnEscapes;
                 return changed;
             }
 
@@ -1782,10 +1785,6 @@ namespace ts.pxtc {
 
             copyRecordFacts(currentVars, currentVarUnknown, objectLiteralRecordProvenanceVars, objectLiteralRecordProvenanceVarUnknown);
             copyRecordFacts(currentReturns, currentReturnUnknown, objectLiteralRecordProvenanceReturns, objectLiteralRecordProvenanceReturnUnknown);
-            for (const key of Object.keys(currentReturnEscapes)) {
-                objectLiteralRecordProvenanceReturnEscapes[key] = true;
-                markObjectLiteralRecordInterfaceFieldsNeeded(currentReturns[key], currentReturns[key].decl, "return");
-            }
             objectLiteralRecordProvenanceAnalyzed = true;
         }
 
@@ -4023,7 +4022,7 @@ ${lbl}: .short 0xffff
                 let idx = fieldIndexCore(proc.classInfo,
                     getFieldInfo(proc.classInfo, getName(f)), false)
                 let trg2 = ir.op(EK.FieldAccess, [emitLocalLoad(info.thisParameter)], idx)
-                proc.emitExpr(ir.op(EK.Store, [trg2, emitExpr(f.initializer)]))
+                proc.emitExpr(ir.op(EK.Store, [trg2, emitEscapedExpression(f.initializer, "initializer")]))
             }
 
             flushHoistedFunctionDefinitions()
@@ -5364,10 +5363,7 @@ ${lbl}: .short 0xffff
             if (node.expression) {
                 v = emitExpr(node.expression)
                 noteFunctionRecordReturn(node.expression)
-                if (!objectLiteralRecords)
-                    markExpressionRecordInterfaceFieldsNeeded(node.expression, "return")
-                else if (objectLiteralRecordProvenanceAnalyzed && objectLiteralRecordProvenanceReturnEscapes[nodeKey(proc.action)])
-                    markExpressionRecordInterfaceFieldsNeeded(node.expression, "return")
+                markExpressionRecordInterfaceFieldsNeeded(node.expression, "return")
             } else if (funcHasReturn(proc.action)) {
                 v = emitLit(undefined) // == return undefined
                 noteFunctionRecordReturn(null)
@@ -5608,7 +5604,9 @@ ${lbl}: .short 0xffff
                     }
                 }
                 typeCheckSubtoSup(node.initializer, node)
-                const initializerExpr = emitExpr(node.initializer);
+                const initializerExpr = isGlobalVar(node)
+                    ? emitEscapedExpression(node.initializer, "initializer")
+                    : emitExpr(node.initializer);
                 const initializerRecordInfo = expressionRecordClassInfo(node.initializer);
                 proc.emitExpr(loc.storeByRef(initializerExpr))
                 getVarInfo(node).recordClassInfo = initializerRecordInfo;

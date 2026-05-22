@@ -553,6 +553,7 @@ namespace ts.pxtc {
         ctor?: ir.Procedure;
         toStringMethod?: ir.Procedure;
         recordShapeKey?: string;
+        recordNeedsInterfaceFields?: boolean;
 
         constructor(public id: string, public decl: ClassDeclaration) {
             this.attrs = parseComments(decl)
@@ -1194,6 +1195,28 @@ namespace ts.pxtc {
             bin.usedClassInfos.push(info);
         }
 
+        function markObjectLiteralRecordInterfaceFieldsNeeded(info: ClassInfo, node: Node, reason: string) {
+            if (!info || !info.recordShapeKey)
+                return;
+            info.recordNeedsInterfaceFields = true;
+            traceLowering("objectLiteralRecord.interfaceFieldsNeeded", node, [
+                `record=${info.id}`,
+                `reason=${reason}`
+            ]);
+        }
+
+        function markExpressionRecordInterfaceFieldsNeeded(expr: Expression, reason: string) {
+            const info = expressionRecordClassInfo(expr);
+            if (info)
+                markObjectLiteralRecordInterfaceFieldsNeeded(info, expr, reason);
+        }
+
+        function emitEscapedExpression(expr: Expression, reason: string) {
+            const emitted = emitExpr(expr);
+            markExpressionRecordInterfaceFieldsNeeded(expr, reason);
+            return emitted;
+        }
+
         function expressionRecordClassInfo(expr: Expression) {
             if (!objectLiteralRecords || !expr)
                 return null;
@@ -1693,16 +1716,18 @@ namespace ts.pxtc {
 
             const fieldNames: pxt.Map<boolean> = {}
 
-            for (let fld of inf.allfields) {
-                let fname = getName(fld)
-                let finfo = fieldIndexCore(inf, fld, false)
-                fieldNames[fname] = true
-                inf.itable.push({
-                    name: fname,
-                    info: (finfo.idx + 1) * (isStackMachine() ? 1 : 4),
-                    idx: getIfaceMemberId(fname),
-                    proc: null
-                })
+            if (!inf.recordShapeKey || inf.recordNeedsInterfaceFields) {
+                for (let fld of inf.allfields) {
+                    let fname = getName(fld)
+                    let finfo = fieldIndexCore(inf, fld, false)
+                    fieldNames[fname] = true
+                    inf.itable.push({
+                        name: fname,
+                        info: (finfo.idx + 1) * (isStackMachine() ? 1 : 4),
+                        idx: getIfaceMemberId(fname),
+                        proc: null
+                    })
+                }
             }
 
             for (let curr = inf; curr; curr = curr.baseClassInfo) {
@@ -2064,7 +2089,7 @@ ${lbl}: .short 0xffff
             let coll = ir.shared(ir.rtcall("Array_::mk", []))
             for (let elt of node.elements) {
                 let mask = isRefCountedExpr(elt) ? (1 << 1) : 0
-                proc.emitExpr(ir.rtcall("Array_::push", [coll, emitExpr(elt)], mask))
+                proc.emitExpr(ir.rtcall("Array_::push", [coll, emitEscapedExpression(elt, "arrayElement")], mask))
             }
             if (node.elements.length > 0)
                 // Make sure there is at least one use of the array, so it doesn't get GC-ed away in the last push.
@@ -2678,7 +2703,7 @@ ${lbl}: .short 0xffff
             }
 
             function emitPlain() {
-                let r = mkProcCall(decl, node, args.map((x) => emitExpr(x)))
+                let r = mkProcCall(decl, node, args.map((x) => emitEscapedExpression(x, "callArgument")))
                 let pp = r.data as ir.ProcId
                 if (args[0] && pp.proc && pp.proc.classInfo)
                     pp.isThis = args[0].kind == SK.ThisKeyword
@@ -2709,7 +2734,7 @@ ${lbl}: .short 0xffff
                     baseCtor = p.ctor
                 if (!baseCtor && bin.finalPass)
                     throw userError(9280, lf("super() call requires an explicit constructor in base class"))
-                let ctorArgs = args.map((x) => emitExpr(x))
+                let ctorArgs = args.map((x) => emitEscapedExpression(x, "callArgument"))
                 ctorArgs.unshift(emitThis(funcExpr))
                 return mkProcCallCore(baseCtor, node, ctorArgs)
             }
@@ -2732,7 +2757,7 @@ ${lbl}: .short 0xffff
                         `noArgs=${!!noArgs}`
                     ]);
                     // completely dynamic dispatch
-                    return mkMethodCall(args.map((x) => emitExpr(x)), {
+                    return mkMethodCall(args.map((x) => emitEscapedExpression(x, "callArgument")), {
                         ifaceIndex,
                         callLocationIndex: markCallLocation(node),
                         noArgs
@@ -2759,7 +2784,7 @@ ${lbl}: .short 0xffff
                     }
 
                     U.assert(!bin.finalPass || info.virtualIndex != null, "!bin.finalPass || info.virtualIndex != null")
-                    return mkMethodCall(args.map((x) => emitExpr(x)), {
+                    return mkMethodCall(args.map((x) => emitEscapedExpression(x, "callArgument")), {
                         classInfo: info.parentClassInfo,
                         virtualIndex: info.virtualIndex,
                         noArgs,
@@ -2808,7 +2833,7 @@ ${lbl}: .short 0xffff
                         `noArgs=${!!noArgs}`,
                         `isSet=${noArgs && args.length == 2}`
                     ]);
-                    return mkMethodCall(args.map((x) => emitExpr(x)), {
+                    return mkMethodCall(args.map((x) => emitEscapedExpression(x, "callArgument")), {
                         ifaceIndex,
                         isSet: noArgs && args.length == 2,
                         callLocationIndex: markCallLocation(node),
@@ -2831,7 +2856,7 @@ ${lbl}: .short 0xffff
             args.unshift(funcExpr)
 
             U.assert(!noArgs)
-            return mkMethodCall(args.map(x => emitExpr(x)), {
+            return mkMethodCall(args.map(x => emitEscapedExpression(x, "callArgument")), {
                 virtualIndex: -1,
                 callLocationIndex: markCallLocation(node),
                 noArgs
@@ -2992,7 +3017,7 @@ ${lbl}: .short 0xffff
                     // let sig = checker.getResolvedSignature(node)
                     // TODO: can we have overloeads?
                     addDefaultParametersAndTypeCheck(checker.getResolvedSignature(node), args, ctorAttrs)
-                    let compiled = args.map((x) => emitExpr(x))
+                    let compiled = args.map((x) => emitEscapedExpression(x, "callArgument"))
                     if (ctorAttrs.shim) {
                         // TODO need to deal with refMask and tagged ints here
                         // we drop 'obj' variable
@@ -3685,7 +3710,7 @@ ${lbl}: .short 0xffff
                 if (decl && (isGlobal || isVar(decl) || isParameter(decl))) {
                     let l = lookupCell(decl)
                     recordUse(<VarOrParam>decl, true)
-                    proc.emitExpr(l.storeByRef(emitExpr(src)))
+                    proc.emitExpr(l.storeByRef(emitEscapedExpression(src, "assignment")))
                 } else {
                     unhandled(trg, lf("bad target identifier"), 9248)
                 }
@@ -3713,7 +3738,7 @@ ${lbl}: .short 0xffff
                             }
                         }
                         let trg2 = emitExpr(trg)
-                        proc.emitExpr(ir.op(EK.Store, [trg2, emitExpr(src)]))
+                        proc.emitExpr(ir.op(EK.Store, [trg2, emitEscapedExpression(src, "assignment")]))
                         break;
                     }
                 }
@@ -4134,7 +4159,7 @@ ${lbl}: .short 0xffff
             let convInfos: ir.ConvInfo[] = []
 
             let args2 = args.map((a, i) => {
-                let r = emitExpr(a)
+                let r = emitEscapedExpression(a, "runtimeCallArgument")
                 if (!needsNumberConversions())
                     return r
                 let f = fmt[i + 1]
@@ -4724,6 +4749,7 @@ ${lbl}: .short 0xffff
             if (node.expression) {
                 v = emitExpr(node.expression)
                 noteFunctionRecordReturn(node.expression)
+                markExpressionRecordInterfaceFieldsNeeded(node.expression, "return")
             } else if (funcHasReturn(proc.action)) {
                 v = emitLit(undefined) // == return undefined
                 noteFunctionRecordReturn(null)

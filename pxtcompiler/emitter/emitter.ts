@@ -1284,6 +1284,102 @@ namespace ts.pxtc {
             }
         }
 
+        function expressionConstructsRefTag(expr: Expression, refTag: number): string {
+            if (!expr)
+                return "";
+            switch (expr.kind) {
+                case SK.ParenthesizedExpression:
+                    return expressionConstructsRefTag((expr as ParenthesizedExpression).expression, refTag);
+                case SK.AsExpression:
+                case SK.TypeAssertionExpression:
+                    return expressionConstructsRefTag((expr as AssertionExpression).expression, refTag);
+                case SK.ArrayLiteralExpression:
+                    return refTag == pxt.BuiltInType.RefCollection ? "arrayLiteral" : "";
+                case SK.ArrowFunction:
+                case SK.FunctionExpression:
+                    return refTag == pxt.BuiltInType.RefAction ? "functionLiteral" : "";
+                case SK.Identifier: {
+                    const decl = getDeclCore(expr);
+                    if (decl && decl.kind == SK.FunctionDeclaration && refTag == pxt.BuiltInType.RefAction)
+                        return "functionDeclaration";
+                    if (!decl || decl.kind != SK.VariableDeclaration)
+                        return "";
+                    const vinfo = getVarInfo(decl);
+                    if (vinfo.written)
+                        return "";
+                    const reason: string = expressionConstructsRefTag((decl as VariableDeclaration).initializer as Expression, refTag);
+                    return reason ? "local:" + reason : "";
+                }
+                case SK.PropertyAccessExpression: {
+                    const pacc = expr as PropertyAccessExpression;
+                    if (pacc.expression.kind != SK.ThisKeyword)
+                        return "";
+                    return classFieldConstructsRefTag(getDeclCore(pacc), refTag);
+                }
+                default:
+                    return "";
+            }
+        }
+
+        function assignedRefTagReason(expr: Expression, fieldName: string, refTag: number): string {
+            if (!expr || expr.kind != SK.BinaryExpression)
+                return "";
+            const binExpr = expr as BinaryExpression;
+            if (!isThisFieldAccess(binExpr.left as Expression, fieldName))
+                return "";
+            if (binExpr.operatorToken.kind != SK.EqualsToken)
+                return "";
+            return expressionConstructsRefTag(binExpr.right, refTag);
+        }
+
+        function constructorAssignsFieldRefTag(ctor: ConstructorDeclaration, fieldName: string, refTag: number): boolean {
+            if (!ctor.body)
+                return false;
+            for (const stmt of ctor.body.statements) {
+                if (stmt.kind != SK.ExpressionStatement)
+                    continue;
+                if (assignedRefTagReason((stmt as ExpressionStatement).expression, fieldName, refTag))
+                    return true;
+            }
+            return false;
+        }
+
+        function classFieldHasOnlyRefTagAssignments(classDecl: ClassDeclaration, fieldName: string, refTag: number): boolean {
+            let safe = true;
+            const visit = (node: Node) => {
+                if (!safe)
+                    return;
+                if (node.kind == SK.BinaryExpression) {
+                    const binExpr = node as BinaryExpression;
+                    if (isThisFieldAccess(binExpr.left as Expression, fieldName) &&
+                        !assignedRefTagReason(binExpr, fieldName, refTag)) {
+                        safe = false;
+                    }
+                }
+                ts.forEachChild(node, child => visit(child as Node));
+            };
+            visit(classDecl);
+            return safe;
+        }
+
+        function classFieldConstructsRefTag(decl: Declaration, refTag: number): string {
+            if (!decl || decl.kind != SK.PropertyDeclaration)
+                return "";
+            const field = decl as PropertyDeclaration;
+            const classDecl = field.parent as ClassDeclaration;
+            if (!classDecl || classDecl.kind != SK.ClassDeclaration)
+                return "";
+
+            const fieldName = getName(field);
+            const initializerReason: string = expressionConstructsRefTag(field.initializer as Expression, refTag);
+            const ctors = classDecl.members.filter(m => m.kind == SK.Constructor) as ConstructorDeclaration[];
+            const hasConstructorAssignments = ctors.length > 0 && ctors.every(ctor => constructorAssignsFieldRefTag(ctor, fieldName, refTag));
+            if ((initializerReason || hasConstructorAssignments) && classFieldHasOnlyRefTagAssignments(classDecl, fieldName, refTag))
+                return initializerReason ? "field:" + initializerReason : "field:constructor";
+
+            return "";
+        }
+
         function objectLiteralPropertyName(p: ObjectLiteralElementLike) {
             if (p.kind == SK.SpreadAssignment)
                 return undefined;
@@ -5162,20 +5258,33 @@ ${lbl}: .short 0xffff
                 } else if (f[0] == "_" || f == "T" || f == "N") {
                     let t = getRefTagToValidate(f)
                     if (t) {
-                        traceValidationCheck("runtimeCallArgument", a, [
-                            `shim=${name}`,
-                            `argIndex=${i}`,
-                            `refTag=${t}`,
-                            `nullable=${!!attrs.argsNullable}`,
-                            `argShape=${receiverShape(a)}`,
-                            `argType=${typeText(typeOf(a))}`
-                        ]);
-                        convInfos.push({
-                            argIdx: i,
-                            method: "_validate",
-                            refTag: t,
-                            refTagNullable: !!attrs.argsNullable
-                        })
+                        const refTagProof = expressionConstructsRefTag(a, t);
+                        if (refTagProof) {
+                            traceValidationCheck("runtimeCallArgumentElided", a, [
+                                `shim=${name}`,
+                                `argIndex=${i}`,
+                                `refTag=${t}`,
+                                `reason=${refTagProof}`,
+                                `nullable=${!!attrs.argsNullable}`,
+                                `argShape=${receiverShape(a)}`,
+                                `argType=${typeText(typeOf(a))}`
+                            ]);
+                        } else {
+                            traceValidationCheck("runtimeCallArgument", a, [
+                                `shim=${name}`,
+                                `argIndex=${i}`,
+                                `refTag=${t}`,
+                                `nullable=${!!attrs.argsNullable}`,
+                                `argShape=${receiverShape(a)}`,
+                                `argType=${typeText(typeOf(a))}`
+                            ]);
+                            convInfos.push({
+                                argIdx: i,
+                                method: "_validate",
+                                refTag: t,
+                                refTagNullable: !!attrs.argsNullable
+                            })
+                        }
                     }
                     return r
                 } else if (f == "I") {

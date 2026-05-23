@@ -889,9 +889,14 @@ ${baseLabel}_nochk:
         }
 
         private shouldSpecializeIfaceCall(ifaceIndex: number, numargs: number, getset: string) {
-            if (!isThumb() || !this.bin.finalPass || getset != "get" || numargs != 1)
+            if (!isThumb() || !this.bin.finalPass)
                 return false
-            return (this.bin.ifaceCallCounts[this.ifaceCallCountKey(ifaceIndex, numargs, getset)] || 0) >= 3
+            const count = this.bin.ifaceCallCounts[this.ifaceCallCountKey(ifaceIndex, numargs, getset)] || 0
+            if (getset == "get" && numargs == 1)
+                return count >= 3
+            if (getset == "set" || !getset)
+                return count >= 3
+            return false
         }
 
         // vtable in r3; clobber r2

@@ -1038,7 +1038,7 @@ namespace ts.pxtc {
         let bin = new Binary()
         let proc: ir.Procedure;
         const loweringTrace = (opts.target.switches as any).loweringTrace ? [] as string[] : undefined;
-        const objectLiteralRecords = !!(opts.target.switches as any).objectLiteralRecords;
+        const objectLiteralRecords = false;
         const objectLiteralRecordClassInfos: pxt.Map<ClassInfo> = {};
         const objectLiteralRecordShapeCounts: pxt.Map<number> = {};
         const objectLiteralRecordShapeReadCounts: pxt.Map<number> = {};

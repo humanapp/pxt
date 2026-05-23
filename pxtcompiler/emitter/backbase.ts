@@ -859,15 +859,39 @@ ${baseLabel}_nochk:
 
         private emitIfaceCall(procid: ir.ProcId, numargs: number, getset = "") {
             U.assert(procid.ifaceIndex > 0)
-            this.write(this.t.emit_int(procid.ifaceIndex, "r1"))
-
             const helperKey = "ifacecall" + numargs + "_" + getset
-            const helper = this.emitLabelledHelper(helperKey, () => {
+            const helper = this.ensureLabelledHelper(helperKey, () => {
                 this.write(`ldr r0, [sp, #0] ; ld-this`)
                 this.loadVTable()
                 this.ifaceCallCore(numargs, getset)
             })
-            this.traceLowering(`emitIfaceCall | ifaceIndex=${procid.ifaceIndex} | numargs=${numargs} | getset=${getset || "call"} | helperKey=${helperKey} | helper=${helper}`)
+            const countKey = this.ifaceCallCountKey(procid.ifaceIndex, numargs, getset)
+
+            let emittedHelper = helper
+            let specialized = false
+            if (this.shouldSpecializeIfaceCall(procid.ifaceIndex, numargs, getset)) {
+                const thunkKey = helperKey + "_i" + procid.ifaceIndex
+                emittedHelper = this.emitLabelledHelper(thunkKey, () => {
+                    this.write(this.t.emit_int(procid.ifaceIndex, "r1"))
+                    this.write(`ldlit r7, ${helper}@fn`)
+                    this.write(`bx r7`)
+                })
+                specialized = true
+            } else {
+                this.write(this.t.emit_int(procid.ifaceIndex, "r1"))
+                this.write(this.t.call_lbl(helper))
+            }
+            this.traceLowering(`emitIfaceCall | ifaceIndex=${procid.ifaceIndex} | numargs=${numargs} | getset=${getset || "call"} | helperKey=${helperKey} | helper=${emittedHelper} | specialized=${specialized} | count=${this.bin.ifaceCallCounts[countKey] || 0}`)
+        }
+
+        private ifaceCallCountKey(ifaceIndex: number, numargs: number, getset: string) {
+            return `${ifaceIndex}:${numargs}:${getset || "call"}`
+        }
+
+        private shouldSpecializeIfaceCall(ifaceIndex: number, numargs: number, getset: string) {
+            if (!isThumb() || !this.bin.finalPass || getset != "get" || numargs != 1)
+                return false
+            return (this.bin.ifaceCallCounts[this.ifaceCallCountKey(ifaceIndex, numargs, getset)] || 0) >= 8
         }
 
         // vtable in r3; clobber r2
@@ -1110,22 +1134,30 @@ ${baseLabel}_nochk:
             this.write(this.t.call_lbl(name, saveStack, this.stackAlignmentNeeded(off)) + cmt)
         }
 
-        private emitLabelledHelper(lbl: string, generate: () => void) {
+        private ensureLabelledHelper(lbl: string, generate: () => void) {
             if (!this.labelledHelpers[lbl]) {
                 let outp = this.redirectOutput(generate)
-                this.emitHelper(outp, lbl)
-                this.labelledHelpers[lbl] = this.bin.codeHelpers[outp];
-            } else {
-                this.write(this.t.call_lbl(this.labelledHelpers[lbl]))
+                this.labelledHelpers[lbl] = this.helperLabel(outp, lbl);
             }
             return this.labelledHelpers[lbl]
         }
 
-        private emitHelper(asm: string, baseName = "hlp") {
+        private emitLabelledHelper(lbl: string, generate: () => void) {
+            const helper = this.ensureLabelledHelper(lbl, generate)
+            this.write(this.t.call_lbl(helper))
+            return helper
+        }
+
+        private helperLabel(asm: string, baseName = "hlp") {
             if (!this.bin.codeHelpers[asm]) {
                 let len = Object.keys(this.bin.codeHelpers).length
                 this.bin.codeHelpers[asm] = `_${baseName}_${len}`
             }
+            return this.bin.codeHelpers[asm]
+        }
+
+        private emitHelper(asm: string, baseName = "hlp") {
+            this.helperLabel(asm, baseName)
             this.write(this.t.call_lbl(this.bin.codeHelpers[asm]))
         }
 

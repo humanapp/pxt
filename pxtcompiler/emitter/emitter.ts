@@ -2305,6 +2305,7 @@ namespace ts.pxtc {
         reset();
         needsUsingInfo = false
         bin.finalPass = true
+        bin.ifaceCallCounts = {}
         emit(rootFunction)
 
         U.assert(usedWorkList.length == 0)
@@ -3870,13 +3871,16 @@ ${lbl}: .short 0xffff
                     const ifaceIndex = getIfaceMemberId(getName(decl), true);
                     const isSet = noArgs && args.length == 2;
                     const callKind = isSet ? "set" : noArgs ? "get" : "call";
+                    const helperGetSet = callKind == "call" ? "" : callKind;
+                    const countKey = `${ifaceIndex}:${args.length}:${helperGetSet || "call"}`;
+                    bin.ifaceCallCounts[countKey] = (bin.ifaceCallCounts[countKey] || 0) + 1;
                     const recordUse = recv ? expressionRecordClassInfoWithSource(recv) : null;
                     traceLowering("emitCallCore.ifaceCall", node, [
                         `declKind=${kindName(decl.kind)}`,
                         `declName=${declName(decl)}`,
                         `ifaceIndex=${ifaceIndex}`,
                         `callKind=${callKind}`,
-                        `helperKey=ifacecall${args.length}_${callKind == "call" ? "" : callKind}`,
+                        `helperKey=ifacecall${args.length}_${helperGetSet}`,
                         recv ? `receiverShape=${receiverShape(recv)}` : "",
                         recv ? `receiverText=${shortNodeText(recv)}` : "",
                         recv ? `receiverType=${typeText(typeOf(recv))}` : "",
@@ -6655,6 +6659,7 @@ ${lbl}: .short 0xffff
         explicitlyUsedIfaceMembers: pxt.Map<boolean> = {};
         ifaceMemberMap: pxt.Map<number> = {};
         ifaceMembers: string[];
+        ifaceCallCounts: pxt.Map<number> = {};
         strings: pxt.Map<string> = {};
         hexlits: pxt.Map<string> = {};
         doubles: pxt.Map<string> = {};

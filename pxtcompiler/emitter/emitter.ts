@@ -939,6 +939,7 @@ namespace ts.pxtc {
         shimName: string;
         classInfo: ClassInfo;
         needsCheck: boolean;
+        checkElisionReason?: string;
     }
 
     export type VarOrParam = VariableDeclaration | ParameterDeclaration | PropertyDeclaration | BindingElement;
@@ -1050,6 +1051,8 @@ namespace ts.pxtc {
         const objectLiteralRecordProvenanceVarUnknown: pxt.Map<boolean> = {};
         const objectLiteralRecordProvenanceReturns: pxt.Map<ClassInfo> = {};
         const objectLiteralRecordProvenanceReturnUnknown: pxt.Map<boolean> = {};
+        const concreteClassFieldInfos: pxt.Map<ClassInfo> = {};
+        const concreteClassFieldUnknown: pxt.Map<boolean> = {};
         bin.trace = opts.trace;
         bin.loweringTrace = loweringTrace;
         bin.breakpoints = opts.breakpoints;
@@ -1155,6 +1158,130 @@ namespace ts.pxtc {
 
         function traceValidationCheck(reason: string, node?: Node, details?: string[]) {
             traceLowering("emitValidationCheck." + reason, node, details);
+        }
+
+        function sameClassInfo(a: ClassInfo, b: ClassInfo) {
+            return !!a && !!b && a.id == b.id;
+        }
+
+        function newExpressionClassInfo(expr: Expression) {
+            if (!expr || expr.kind != SK.NewExpression)
+                return null;
+            const tp = typeOf(expr);
+            return isPossiblyGenericClassType(tp) ? getClassInfo(tp) : null;
+        }
+
+        function isThisFieldAccess(expr: Expression, fieldName: string) {
+            if (!expr || expr.kind != SK.PropertyAccessExpression)
+                return false;
+            const pacc = expr as PropertyAccessExpression;
+            return pacc.expression.kind == SK.ThisKeyword && pacc.name.text == fieldName;
+        }
+
+        function assignedNewClassInfo(expr: Expression, fieldName: string) {
+            if (!expr || expr.kind != SK.BinaryExpression)
+                return null;
+            const binExpr = expr as BinaryExpression;
+            if (!isThisFieldAccess(binExpr.left as Expression, fieldName))
+                return null;
+            if (binExpr.operatorToken.kind != SK.EqualsToken)
+                return null;
+            return newExpressionClassInfo(binExpr.right);
+        }
+
+        function constructorAssignsFieldNew(ctor: ConstructorDeclaration, fieldName: string, info: ClassInfo) {
+            if (!ctor.body)
+                return false;
+            for (const stmt of ctor.body.statements) {
+                if (stmt.kind != SK.ExpressionStatement)
+                    continue;
+                const assignedInfo = assignedNewClassInfo((stmt as ExpressionStatement).expression, fieldName);
+                if (sameClassInfo(assignedInfo, info))
+                    return true;
+            }
+            return false;
+        }
+
+        function classFieldHasOnlyConcreteAssignments(classDecl: ClassDeclaration, fieldName: string, info: ClassInfo) {
+            let safe = true;
+            const visit = (node: Node) => {
+                if (!safe)
+                    return;
+                if (node.kind == SK.BinaryExpression) {
+                    const binExpr = node as BinaryExpression;
+                    if (isThisFieldAccess(binExpr.left as Expression, fieldName)) {
+                        const assignedInfo = assignedNewClassInfo(binExpr, fieldName);
+                        if (!sameClassInfo(assignedInfo, info))
+                            safe = false;
+                    }
+                }
+                ts.forEachChild(node, child => visit(child as Node));
+            };
+            visit(classDecl);
+            return safe;
+        }
+
+        function concreteClassFieldInfo(decl: Declaration) {
+            if (!decl || decl.kind != SK.PropertyDeclaration)
+                return null;
+
+            const key = getNodeId(decl) + "";
+            if (concreteClassFieldUnknown[key])
+                return null;
+            if (concreteClassFieldInfos[key])
+                return concreteClassFieldInfos[key];
+
+            const info = isPossiblyGenericClassType(typeOf(decl)) ? getClassInfo(typeOf(decl)) : null;
+            const field = decl as PropertyDeclaration;
+            const classDecl = field.parent as ClassDeclaration;
+            if (!info || !classDecl || classDecl.kind != SK.ClassDeclaration) {
+                concreteClassFieldUnknown[key] = true;
+                return null;
+            }
+
+            const fieldName = getName(field);
+            const initializerInfo = newExpressionClassInfo(field.initializer as Expression);
+            const ctors = classDecl.members.filter(m => m.kind == SK.Constructor) as ConstructorDeclaration[];
+            const hasInitializer = sameClassInfo(initializerInfo, info);
+            const hasConstructorAssignments = ctors.length > 0 && ctors.every(ctor => constructorAssignsFieldNew(ctor, fieldName, info));
+            if ((hasInitializer || hasConstructorAssignments) && classFieldHasOnlyConcreteAssignments(classDecl, fieldName, info)) {
+                concreteClassFieldInfos[key] = info;
+                return info;
+            }
+
+            concreteClassFieldUnknown[key] = true;
+            return null;
+        }
+
+        function concreteClassExpressionInfo(expr: Expression): ClassInfo {
+            if (!expr)
+                return null;
+            switch (expr.kind) {
+                case SK.ParenthesizedExpression:
+                    return concreteClassExpressionInfo((expr as ParenthesizedExpression).expression);
+                case SK.AsExpression:
+                case SK.TypeAssertionExpression:
+                    return concreteClassExpressionInfo((expr as AssertionExpression).expression);
+                case SK.NewExpression:
+                    return newExpressionClassInfo(expr);
+                case SK.PropertyAccessExpression: {
+                    const pacc = expr as PropertyAccessExpression;
+                    if (pacc.expression.kind == SK.ThisKeyword)
+                        return concreteClassFieldInfo(getDeclCore(pacc));
+                    return null;
+                }
+                case SK.Identifier: {
+                    const decl = getDeclCore(expr);
+                    if (!decl || decl.kind != SK.VariableDeclaration)
+                        return null;
+                    const vinfo = getVarInfo(decl);
+                    if (vinfo.written)
+                        return null;
+                    return concreteClassExpressionInfo((decl as VariableDeclaration).initializer as Expression);
+                }
+                default:
+                    return null;
+            }
         }
 
         function objectLiteralPropertyName(p: ObjectLiteralElementLike) {
@@ -3043,6 +3170,17 @@ ${lbl}: .short 0xffff
                                 `receiverText=${shortNodeText(node.expression)}`,
                                 `receiverType=${typeText(typeOf(node.expression))}`
                             ]);
+                        } else if (idx.checkElisionReason == "concreteReceiver") {
+                            traceValidationCheck("fieldAccessElided", node, [
+                                `declKind=${kindName(decl.kind)}`,
+                                `declName=${declName(decl)}`,
+                                `class=${classInfoName(idx.classInfo)}`,
+                                `field=${idx.name}`,
+                                `reason=${idx.checkElisionReason}`,
+                                `receiverShape=${receiverShape(node.expression)}`,
+                                `receiverText=${shortNodeText(node.expression)}`,
+                                `receiverType=${typeText(typeOf(node.expression))}`
+                            ]);
                         }
                         traceLowering("emitPropertyAccess.fieldAccess", node, [
                             `declKind=${kindName(decl.kind)}`,
@@ -4474,7 +4612,7 @@ ${lbl}: .short 0xffff
             throw unhandled(node, lf("unsupported postfix unary operation"), 9246)
         }
 
-        function fieldIndexCore(info: ClassInfo, fld: FieldWithAddInfo, needsCheck = true): FieldAccessInfo {
+        function fieldIndexCore(info: ClassInfo, fld: FieldWithAddInfo, needsCheck = true, checkElisionReason = ""): FieldAccessInfo {
             if (isStatic(fld))
                 U.oops("fieldIndex on static field: " + getName(fld))
             let attrs = parseComments(fld)
@@ -4487,7 +4625,8 @@ ${lbl}: .short 0xffff
                 isRef: true,
                 shimName: attrs.shim,
                 classInfo: info,
-                needsCheck
+                needsCheck,
+                checkElisionReason
             }
         }
 
@@ -4496,9 +4635,15 @@ ${lbl}: .short 0xffff
             if (isPossiblyGenericClassType(tp)) {
                 const info = getClassInfo(tp)
                 let noCheck = pacc.expression.kind == SK.ThisKeyword
+                let checkElisionReason = noCheck ? "thisReceiver" : "";
+                const concreteInfo = noCheck ? null : concreteClassExpressionInfo(pacc.expression);
+                if (!noCheck && sameClassInfo(concreteInfo, info)) {
+                    noCheck = true;
+                    checkElisionReason = "concreteReceiver";
+                }
                 if (target.switches.noThisCheckOpt)
                     noCheck = false
-                return fieldIndexCore(info, getFieldInfo(info, pacc.name.text), !noCheck)
+                return fieldIndexCore(info, getFieldInfo(info, pacc.name.text), !noCheck, checkElisionReason)
             } else {
                 throw unhandled(pacc, lf("bad field access"), 9247)
             }

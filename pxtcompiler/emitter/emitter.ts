@@ -5329,11 +5329,21 @@ ${lbl}: .short 0xffff
                     throw U.oops("invalid format specifier: " + f)
                 }
             })
+            let skipNativeReturnConversion = false
+            if (opts.target.isNative && isThumb() && name == "Array_::length" && fmt[0] == "I") {
+                traceLowering("emitRuntimeReturnConversion.arrayLengthTagged", args[0], [
+                    "conversion=fromInt",
+                    `shim=${name}`
+                ]);
+                name = "_pxt_array_length_tagged"
+                skipNativeReturnConversion = true
+            }
+
             let r = ir.rtcallMask(name, mask,
                 attrs ? attrs.callingConvention : ir.CallingConvention.Plain, args2)
             if (!r.mask) r.mask = { refMask: 0 }
             r.mask.conversions = convInfos
-            if (opts.target.isNative) {
+            if (opts.target.isNative && !skipNativeReturnConversion) {
                 let f0 = fmt[0]
                 if (f0 == "I") {
                     traceLowering("emitRuntimeReturnConversion", args[0], [

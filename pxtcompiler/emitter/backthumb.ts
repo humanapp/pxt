@@ -376,6 +376,30 @@ _pxt_switch_eq:
 `
             r += boxedOp(`bl pxt::switch_eq`)
 
+            r += `
+.section code
+.object _pxt_helper_array_length_tagged
+_pxt_array_length_tagged:
+    @scope _pxt_array_length_tagged
+    lsls r1, r0, #30
+    bne .boxed
+    cmp r0, #0
+    beq .boxed
+    ldr r2, [r0, #0]
+    ldrh r2, [r2, #8]
+    cmp r2, #${pxt.BuiltInType.RefCollection}
+    bne .boxed
+    ldrh r0, [r0, #8]
+    lsls r0, r0, #1
+    adds r0, r0, #1
+    bx lr
+.boxed:
+    ${this.pushLR()}
+    ${this.callCPP("Array_::length")}
+    bl _numops_fromInt
+    ${this.popPC()}
+`
+
             return r
         }
 

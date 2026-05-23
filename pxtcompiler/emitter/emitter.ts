@@ -3328,6 +3328,15 @@ ${lbl}: .short 0xffff
                 indexer = "String_::charAt"
             } else if (isArrayType(t)) {
                 indexer = assign ? "Array_::setAt" : "Array_::getAt"
+                traceLowering("emitIndexedAccess.array", node, [
+                    `op=${assign ? "set" : "get"}`,
+                    `receiverShape=${receiverShape(node.expression)}`,
+                    `receiverType=${typeText(t)}`,
+                    `argumentKind=${kindName(node.argumentExpression.kind)}`,
+                    `argumentText=${shortNodeText(node.argumentExpression)}`,
+                    `argumentType=${typeText(typeOf(node.argumentExpression))}`,
+                    `argumentNumberLike=${isNumberLike(node.argumentExpression)}`
+                ])
             } else if (isInterfaceType(t)) {
                 attrs = parseCommentsOnSymbol(t.symbol)
                 indexer = assign ? attrs.indexerSet : attrs.indexerGet

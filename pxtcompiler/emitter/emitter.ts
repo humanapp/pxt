@@ -2840,10 +2840,12 @@ ${lbl}: .short 0xffff
         function emitObjectLiteral(node: ObjectLiteralExpression) {
             const contextualType = checker.getContextualType(node);
             const recordCandidate = analyzeClosedObjectLiteral(node, contextualType);
+            const objectLiteralProperties = node.properties.map(p => objectLiteralPropertyName(p) || "");
+            const computedPropertyCount = node.properties.filter(p => p.kind != SK.SpreadAssignment && (p as PropertyAssignment | ShorthandPropertyAssignment).name && (p as PropertyAssignment | ShorthandPropertyAssignment).name.kind == SK.ComputedPropertyName).length;
             traceLowering("emitObjectLiteral.map", node, [
                 `type=${typeText(typeOf(node))}`,
                 `contextualType=${typeText(contextualType)}`,
-                `properties=${node.properties.map(p => objectLiteralPropertyName(p) || "").join(",")}`,
+                `properties=${objectLiteralProperties.join(",")}`,
                 `native=${!!target.isNative}`
             ]);
             traceLowering("objectLiteralRecordCandidate", node, [
@@ -2867,6 +2869,19 @@ ${lbl}: .short 0xffff
                 ]);
                 return emitObjectLiteralRecord(node, recordCandidate);
             }
+            traceLowering("emitObjectLiteral.mapEmit", node, [
+                recordCandidate.eligible ? "acceptedRecordCandidate" : "rejectedRecordCandidate",
+                `reason=${recordCandidate.reason}`,
+                `type=${typeText(typeOf(node))}`,
+                `contextualType=${typeText(contextualType)}`,
+                `fields=${recordCandidate.fields.join(",")}`,
+                `properties=${objectLiteralProperties.join(",")}`,
+                `propertyCount=${node.properties.length}`,
+                `computedPropertyCount=${computedPropertyCount}`,
+                `shapeCount=${recordCandidate.eligible ? objectLiteralRecordShapeCounts[recordCandidate.shapeKey] || 0 : 0}`,
+                `shapeReadCount=${recordCandidate.eligible ? objectLiteralRecordShapeReadCounts[recordCandidate.shapeKey] || 0 : 0}`,
+                `native=${!!target.isNative}`
+            ]);
             let expr = ir.shared(ir.rtcall("pxtrt::mkMap", []))
             node.properties.forEach((p: PropertyAssignment | ShorthandPropertyAssignment) => {
                 assert(!p.questionToken) // should be disallowed by TS grammar checker

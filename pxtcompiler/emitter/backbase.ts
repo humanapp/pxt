@@ -1775,7 +1775,7 @@ ${baseLabel}_nochk:
 
             this.write(`push {lr}`)
 
-            this.emitLabelledHelper(`expand_args_${numargs}`, () => {
+            const expandHelper = this.emitLabelledHelper(`expand_args_${numargs}`, () => {
                 this.write(`movs r0, #0`)
                 this.write(`movs r1, #0`)
                 if (needsAlign)
@@ -1792,6 +1792,7 @@ ${baseLabel}_nochk:
                 }
                 this.write(`bx lr`)
             })
+            this.traceLowering(`emitExpandArgsWrapper | proc=${this.proc.getFullName()} | label=${this.proc.label()} | helper=${expandHelper} | numargs=${numargs} | needsAlign=${needsAlign} | usedAsValue=${!!this.proc.info.usedAsValue} | usedAsIface=${!!this.proc.info.usedAsIface} | captured=${this.proc.captured.length} | args=${this.proc.args.length} | isMain=${isMain}`)
 
             this.write(`bl ${this.proc.label()}_nochk`)
 

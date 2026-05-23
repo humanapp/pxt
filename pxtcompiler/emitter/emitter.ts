@@ -1172,7 +1172,12 @@ namespace ts.pxtc {
 
         function objectLiteralRecordShapeIsProfitableCore(shapeKey: string) {
             return (objectLiteralRecordShapeCounts[shapeKey] || 0) >= objectLiteralRecordShapeThreshold ||
+                ((objectLiteralRecordShapeCounts[shapeKey] || 0) >= 2 && objectLiteralRecordShapeFieldCount(shapeKey) >= 5) ||
                 (objectLiteralRecordShapeReadCounts[shapeKey] || 0) >= objectLiteralRecordShapeReadThreshold;
+        }
+
+        function objectLiteralRecordShapeFieldCount(shapeKey: string) {
+            return shapeKey ? shapeKey.split("\n").length : 0;
         }
 
         function objectLiteralRecordClassInfoIsProfitable(info: ClassInfo) {

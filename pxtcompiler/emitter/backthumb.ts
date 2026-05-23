@@ -26,6 +26,7 @@ namespace ts.pxtc {
         "pxt::toInt": "_numops_toInt",
         "pxt::fromInt": "_numops_fromInt",
         "pxt::fromBool": "_pxt_fromBool",
+        "numops::toBool": "_numops_toBool",
         "numops::toBoolDecr": "_numops_toBoolDecr",
         "Boolean_::bang": "_pxt_boolean_bang",
         "pxt::switch_eq": "_pxt_switch_eq",
@@ -349,6 +350,31 @@ _pxt_boolean_bang:
 .true:
     movs r0, #1
     blx lr
+
+_numops_toBool:
+    @scope _numops_toBool
+    cmp r0, #0
+    beq .false
+    cmp r0, #1
+    beq .false
+    lsls r1, r0, #31
+    bne .true
+    cmp r0, #${taggedNull}
+    beq .false
+    cmp r0, #${taggedFalse}
+    beq .false
+    cmp r0, #${taggedNaN}
+    beq .false
+    lsls r1, r0, #30
+    beq .boxed
+.true:
+    movs r0, #1
+    blx lr
+.false:
+    movs r0, #0
+    blx lr
+.boxed:
+    ${this.callCPPPush("numops::toBool")}
 
 _numops_toBoolDecr:
     @scope _numops_toBoolDecr

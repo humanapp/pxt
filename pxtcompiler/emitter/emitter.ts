@@ -1086,6 +1086,47 @@ namespace ts.pxtc {
             return (SyntaxKind as any)[kind] || kind + "";
         }
 
+        function receiverShape(expr: Expression): string {
+            if (!expr)
+                return "";
+            switch (expr.kind) {
+                case SK.ParenthesizedExpression:
+                    return receiverShape((expr as ParenthesizedExpression).expression);
+                case SK.AsExpression:
+                case SK.TypeAssertionExpression:
+                    return receiverShape((expr as AssertionExpression).expression);
+                case SK.ElementAccessExpression: {
+                    const indexed = expr as ElementAccessExpression;
+                    const base = indexed.expression;
+                    if (base.kind == SK.ElementAccessExpression)
+                        return "nestedElementAccess";
+                    if (base.kind == SK.PropertyAccessExpression)
+                        return "fieldElementAccess";
+                    return "elementAccess";
+                }
+                case SK.PropertyAccessExpression: {
+                    const access = expr as PropertyAccessExpression;
+                    if (access.expression.kind == SK.ThisKeyword)
+                        return "objectField";
+                    return "propertyChain";
+                }
+                case SK.CallExpression:
+                    return "directCallReturn";
+                case SK.Identifier: {
+                    const decl = getDeclCore(expr);
+                    if (decl && decl.kind == SK.Parameter)
+                        return "parameter";
+                    if (decl && (decl.kind == SK.VariableDeclaration || decl.kind == SK.BindingElement))
+                        return "local";
+                    return "identifier";
+                }
+                case SK.ThisKeyword:
+                    return "this";
+                default:
+                    return kindName(expr.kind);
+            }
+        }
+
         function declName(decl: Declaration) {
             if (!decl)
                 return "";
@@ -2816,6 +2857,8 @@ ${lbl}: .short 0xffff
             traceLowering("emitPropertyAccess", node, [
                 `declKind=${decl ? kindName(decl.kind) : ""}`,
                 `declName=${declName(decl)}`,
+                `receiverShape=${receiverShape(node.expression)}`,
+                `receiverText=${shortNodeText(node.expression)}`,
                 `receiverType=${typeText(typeOf(node.expression))}`,
                 `valueType=${typeText(typeOf(node))}`
             ]);
@@ -3382,6 +3425,9 @@ ${lbl}: .short 0xffff
                     traceLowering("emitCallCore.dynamicIfaceCall", node, [
                         `field=${fieldName}`,
                         `ifaceIndex=${ifaceIndex}`,
+                        recv ? `receiverShape=${receiverShape(recv)}` : "",
+                        recv ? `receiverText=${shortNodeText(recv)}` : "",
+                        recv ? `receiverType=${typeText(typeOf(recv))}` : "",
                         `noArgs=${!!noArgs}`
                     ]);
                     traceObjectLiteralRecordInterfaceUse(node, recv, fieldName, noArgs && args.length == 2, "dynamic");
@@ -3458,6 +3504,9 @@ ${lbl}: .short 0xffff
                         `declKind=${kindName(decl.kind)}`,
                         `declName=${declName(decl)}`,
                         `ifaceIndex=${ifaceIndex}`,
+                        recv ? `receiverShape=${receiverShape(recv)}` : "",
+                        recv ? `receiverText=${shortNodeText(recv)}` : "",
+                        recv ? `receiverType=${typeText(typeOf(recv))}` : "",
                         `needsVCall=${!!needsVCall}`,
                         `forceMethod=${!!forceMethod}`,
                         `noArgs=${!!noArgs}`,

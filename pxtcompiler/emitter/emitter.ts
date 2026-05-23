@@ -201,6 +201,11 @@ namespace ts.pxtc {
         shapeKey: string;
     }
 
+    interface ObjectLiteralRecordTypeInfo {
+        recordInfo?: ClassInfo;
+        ambiguous?: boolean;
+    }
+
     type TemplateLiteralFragment = TemplateHead | TemplateMiddle | TemplateTail;
     export type EmittableAsCall = FunctionLikeDeclaration | SignatureDeclaration | ObjectLiteralElementLike | PropertySignature | ModuleDeclaration
         | ParameterDeclaration | PropertyDeclaration;
@@ -1035,6 +1040,7 @@ namespace ts.pxtc {
         const objectLiteralRecords = !!(opts.target.switches as any).objectLiteralRecords;
         const objectLiteralRecordClassInfos: pxt.Map<ClassInfo> = {};
         const objectLiteralRecordShapeCounts: pxt.Map<number> = {};
+        const objectLiteralRecordTypeInfos: pxt.Map<ObjectLiteralRecordTypeInfo> = {};
         let objectLiteralRecordClassNo = 0;
         const objectLiteralRecordShapeThreshold = 3;
         let objectLiteralRecordProvenanceAnalyzed = false;
@@ -1216,6 +1222,44 @@ namespace ts.pxtc {
             }
             pxtInfo(node).classInfo = info;
             return info;
+        }
+
+        function objectLiteralRecordTypeKey(type: Type) {
+            if (!type)
+                return "";
+            const sym = type.symbol;
+            const decl = sym && sym.valueDeclaration;
+            return decl ? nodeKey(decl) : typeText(type);
+        }
+
+        function noteObjectLiteralRecordTypeInfo(type: Type, recordInfo: ClassInfo) {
+            const key = objectLiteralRecordTypeKey(type);
+            if (!key)
+                return;
+            let info = objectLiteralRecordTypeInfos[key];
+            if (!info)
+                info = objectLiteralRecordTypeInfos[key] = {};
+            if (info.ambiguous)
+                return;
+            if (!recordInfo) {
+                info.recordInfo = null;
+                info.ambiguous = true;
+            } else if (!info.recordInfo) {
+                info.recordInfo = recordInfo;
+            } else if (info.recordInfo != recordInfo) {
+                info.recordInfo = null;
+                info.ambiguous = true;
+            }
+        }
+
+        function expressionContextualRecordClassInfo(expr: Expression) {
+            if (!objectLiteralRecords || !expr || !bin.finalPass)
+                return null;
+            const key = objectLiteralRecordTypeKey(typeOf(expr));
+            const info = key && objectLiteralRecordTypeInfos[key];
+            if (!info || info.ambiguous || !info.recordInfo)
+                return null;
+            return objectLiteralRecordClassInfoIsProfitable(info.recordInfo) ? info.recordInfo : null;
         }
 
         function markProfitableObjectLiteralRecordClasses() {
@@ -2655,7 +2699,9 @@ ${lbl}: .short 0xffff
             ]);
             if (objectLiteralRecords && recordCandidate.eligible && !bin.finalPass) {
                 objectLiteralRecordShapeCounts[recordCandidate.shapeKey] = (objectLiteralRecordShapeCounts[recordCandidate.shapeKey] || 0) + 1;
-                getObjectLiteralRecordClassInfo(node, recordCandidate);
+                noteObjectLiteralRecordTypeInfo(contextualType, getObjectLiteralRecordClassInfo(node, recordCandidate));
+            } else if (objectLiteralRecords && !recordCandidate.eligible && !bin.finalPass) {
+                noteObjectLiteralRecordTypeInfo(contextualType, null);
             }
             if (objectLiteralRecords && recordCandidate.eligible && objectLiteralRecordShapeIsProfitable(recordCandidate.shapeKey)) {
                 traceLowering("emitObjectLiteral.record", node, [
@@ -2750,21 +2796,28 @@ ${lbl}: .short 0xffff
                 throw userError(9210, lf("Cannot compute enum value"))
             } else if (decl.kind == SK.PropertySignature || decl.kind == SK.PropertyAssignment) {
                 noteParameterRecordFieldRead(node.expression, node.name.text);
-                const recordInfo = expressionRecordClassInfo(node.expression);
+                let recordInfo = expressionRecordClassInfo(node.expression);
+                let recordSource = "provenance";
+                if (!recordInfo) {
+                    recordInfo = expressionContextualRecordClassInfo(node.expression);
+                    recordSource = "contextualType";
+                }
                 if (recordInfo) {
                     const recordField = tryGetFieldInfo(recordInfo, node.name.text);
                     if (recordField) {
                         traceLowering("emitPropertyAccess.recordFieldAccess", node, [
                             `declKind=${kindName(decl.kind)}`,
                             `declName=${declName(decl)}`,
-                            `record=${recordInfo.id}`
+                            `record=${recordInfo.id}`,
+                            `source=${recordSource}`
                         ]);
                         return ir.op(EK.FieldAccess, [emitExpr(node.expression)], fieldIndexCore(recordInfo, recordField, false));
                     }
                     traceLowering("emitPropertyAccess.recordFieldMissing", node, [
                         `declKind=${kindName(decl.kind)}`,
                         `declName=${declName(decl)}`,
-                        `record=${recordInfo.id}`
+                        `record=${recordInfo.id}`,
+                        `source=${recordSource}`
                     ]);
                 }
                 traceLowering("emitPropertyAccess.propertyCall", node, [

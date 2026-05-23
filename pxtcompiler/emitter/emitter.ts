@@ -1609,13 +1609,15 @@ namespace ts.pxtc {
         function canUseExactIfaceWrapper(proc: ir.Procedure, ifaceIndex: number, getset: string) {
             if (!isThumb() || !proc || !proc.info.usedAsIface || proc.args.length == 0)
                 return false;
+            if (proc.action && isToString(proc.action))
+                return false;
             if (bin.dynamicIfaceCalls[ifaceIndex + ""])
                 return false;
             if (!getset && ifaceCallKindCounts(ifaceIndex, "get").length)
                 return false;
 
             const counts = ifaceCallKindCounts(ifaceIndex, getset);
-            return counts.length > 0 && counts.every(c => c.numargs >= proc.args.length);
+            return counts.every(c => c.numargs >= proc.args.length);
         }
 
         function markExactIfaceWrappers() {
@@ -1625,6 +1627,27 @@ namespace ts.pxtc {
 
             const eligible: pxt.Map<boolean> = {};
             const seen: pxt.Map<boolean> = {};
+            const rejectionReasons: pxt.Map<pxt.Map<boolean>> = {};
+            const addRejectionReason = (proc: ir.Procedure, reason: string) => {
+                const key = proc.seqNo + "";
+                if (!rejectionReasons[key])
+                    rejectionReasons[key] = {};
+                rejectionReasons[key][reason] = true;
+            };
+            const exactIfaceWrapperRejectReason = (proc: ir.Procedure, ifaceIndex: number, getset: string) => {
+                if (!proc.info.usedAsIface)
+                    return "notUsedAsIface";
+                if (proc.args.length == 0)
+                    return "zeroArgs";
+                if (proc.action && isToString(proc.action))
+                    return "toStringVTable";
+                if (bin.dynamicIfaceCalls[ifaceIndex + ""])
+                    return "dynamicIfaceCall";
+                if (!getset && ifaceCallKindCounts(ifaceIndex, "get").length)
+                    return "methodHasGetterCalls";
+                const counts = ifaceCallKindCounts(ifaceIndex, getset);
+                return counts.some(c => c.numargs < proc.args.length) ? "observedArityTooSmall" : "";
+            };
             const note = (proc: ir.Procedure, ifaceIndex: number, getset: string) => {
                 if (!proc || proc.args.length == 0)
                     return;
@@ -1632,8 +1655,12 @@ namespace ts.pxtc {
                 seen[key] = true;
                 if (eligible[key] === undefined)
                     eligible[key] = true;
-                if (!canUseExactIfaceWrapper(proc, ifaceIndex, getset))
+                if (!canUseExactIfaceWrapper(proc, ifaceIndex, getset)) {
                     eligible[key] = false;
+                    const reason = exactIfaceWrapperRejectReason(proc, ifaceIndex, getset);
+                    if (reason)
+                        addRejectionReason(proc, reason);
+                }
             };
 
             for (const info of bin.usedClassInfos) {
@@ -1650,6 +1677,18 @@ namespace ts.pxtc {
             for (const proc of bin.procs) {
                 const key = proc.seqNo + "";
                 proc.useExactIfaceWrapper = !!seen[key] && !!eligible[key];
+                if (seen[key] && !proc.useExactIfaceWrapper) {
+                    const reasons = rejectionReasons[key];
+                    traceLowering("exactIfaceWrapper.rejected", undefined, [
+                        `proc=${proc.getFullName()}`,
+                        `label=${proc.label()}`,
+                        `numargs=${proc.args.length}`,
+                        `usedAsValue=${!!proc.info.usedAsValue}`,
+                        `usedAsIface=${!!proc.info.usedAsIface}`,
+                        `captured=${proc.captured.length}`,
+                        `reasons=${reasons ? Object.keys(reasons).sort().join(",") : "unknown"}`
+                    ]);
+                }
             }
         }
 

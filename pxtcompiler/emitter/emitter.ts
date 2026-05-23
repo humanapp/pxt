@@ -1596,6 +1596,63 @@ namespace ts.pxtc {
             }
         }
 
+        function ifaceCallKindCounts(ifaceIndex: number, getset: string) {
+            const suffix = ":" + (getset || "call");
+            return Object.keys(bin.ifaceCallCounts)
+                .filter(k => U.startsWith(k, ifaceIndex + ":") && U.endsWith(k, suffix))
+                .map(k => ({
+                    numargs: parseInt(k.split(":")[1]),
+                    count: bin.ifaceCallCounts[k]
+                }));
+        }
+
+        function canUseExactIfaceWrapper(proc: ir.Procedure, ifaceIndex: number, getset: string) {
+            if (!isThumb() || !proc || !proc.info.usedAsIface || proc.args.length == 0)
+                return false;
+            if (bin.dynamicIfaceCalls[ifaceIndex + ""])
+                return false;
+            if (!getset && ifaceCallKindCounts(ifaceIndex, "get").length)
+                return false;
+
+            const counts = ifaceCallKindCounts(ifaceIndex, getset);
+            return counts.length > 0 && counts.every(c => c.numargs >= proc.args.length);
+        }
+
+        function markExactIfaceWrappers() {
+            bin.procs.forEach(p => p.useExactIfaceWrapper = false);
+            if (!isThumb())
+                return;
+
+            const eligible: pxt.Map<boolean> = {};
+            const seen: pxt.Map<boolean> = {};
+            const note = (proc: ir.Procedure, ifaceIndex: number, getset: string) => {
+                if (!proc || proc.args.length == 0)
+                    return;
+                const key = proc.seqNo + "";
+                seen[key] = true;
+                if (eligible[key] === undefined)
+                    eligible[key] = true;
+                if (!canUseExactIfaceWrapper(proc, ifaceIndex, getset))
+                    eligible[key] = false;
+            };
+
+            for (const info of bin.usedClassInfos) {
+                if (!info.itable)
+                    continue;
+                for (const entry of info.itable) {
+                    if (entry.proc)
+                        note(entry.proc, entry.idx, entry.proc.isGetter() ? "get" : "");
+                    if (entry.setProc)
+                        note(entry.setProc, entry.idx, "set");
+                }
+            }
+
+            for (const proc of bin.procs) {
+                const key = proc.seqNo + "";
+                proc.useExactIfaceWrapper = !!seen[key] && !!eligible[key];
+            }
+        }
+
         function markExpressionRecordInterfaceFieldsNeeded(expr: Expression, reason: string) {
             if (!objectLiteralRecords || !expr)
                 return;
@@ -2306,7 +2363,9 @@ namespace ts.pxtc {
         needsUsingInfo = false
         bin.finalPass = true
         bin.ifaceCallCounts = {}
+        bin.dynamicIfaceCalls = {}
         emit(rootFunction)
+        markExactIfaceWrappers()
 
         U.assert(usedWorkList.length == 0)
 
@@ -3790,6 +3849,7 @@ ${lbl}: .short 0xffff
                         recv ? `receiverType=${typeText(typeOf(recv))}` : "",
                         `noArgs=${!!noArgs}`
                     ]);
+                    bin.dynamicIfaceCalls[ifaceIndex + ""] = true;
                     traceObjectLiteralRecordInterfaceUse(node, recv, fieldName, noArgs && args.length == 2, "dynamic");
                     // completely dynamic dispatch
                     return mkMethodCall(args.map((x) => emitEscapedExpression(x, "callArgument")), {
@@ -6660,6 +6720,7 @@ ${lbl}: .short 0xffff
         ifaceMemberMap: pxt.Map<number> = {};
         ifaceMembers: string[];
         ifaceCallCounts: pxt.Map<number> = {};
+        dynamicIfaceCalls: pxt.Map<boolean> = {};
         strings: pxt.Map<string> = {};
         hexlits: pxt.Map<string> = {};
         doubles: pxt.Map<string> = {};

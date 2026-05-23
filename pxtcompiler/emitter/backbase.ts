@@ -1760,6 +1760,14 @@ ${baseLabel}_nochk:
                 this.write(`.word ${this.proc.label()}_args@fn`)
             }
 
+            if (this.proc.useExactIfaceWrapper) {
+                this.write(`${this.proc.label()}_iface:`)
+                this.write(`b ${this.proc.label()}_nochk`)
+                this.traceLowering(`emitExactIfaceWrapper | proc=${this.proc.getFullName()} | label=${this.proc.label()} | numargs=${this.proc.args.length} | usedAsValue=${!!this.proc.info.usedAsValue} | usedAsIface=${!!this.proc.info.usedAsIface} | captured=${this.proc.captured.length} | args=${this.proc.args.length} | isMain=${isMain}`)
+                if (!this.proc.info.usedAsValue)
+                    return
+            }
+
             this.write(`${this.proc.label()}_args:`)
 
             let numargs = this.proc.args.length

@@ -860,11 +860,11 @@ ${info.id}_IfaceVT:
             offsets[e.idx + ""] = offset
             const desc = !e.proc ? 0 : e.proc.isGetter() ? 1 : 2
             descs += `  .short ${e.idx}, ${desc} ; ${e.name}\n`
-            descs += `  .word ${e.proc ? e.proc.vtLabel() + "@fn" : e.info}\n`
+            descs += `  .word ${e.proc ? e.proc.ifaceVtLabel() + "@fn" : e.info}\n`
             offset += descSize
             if (e.setProc) {
                 descs += `  .short ${e.idx}, 0 ; set ${e.name}\n`
-                descs += `  .word ${e.setProc.vtLabel()}@fn\n`
+                descs += `  .word ${e.setProc.ifaceVtLabel()}@fn\n`
                 offset += descSize
             }
         }

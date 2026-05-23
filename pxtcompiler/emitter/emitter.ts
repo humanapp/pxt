@@ -1282,7 +1282,9 @@ namespace ts.pxtc {
             info.recordNeedsInterfaceFields = true;
             traceLowering("objectLiteralRecord.interfaceFieldsNeeded", node, [
                 `record=${info.id}`,
-                `reason=${reason}`
+                `reason=${reason}`,
+                `fields=${recordFieldsText(info)}`,
+                `shapeCount=${objectLiteralRecordShapeCount(info) || 0}`
             ]);
         }
 
@@ -1379,6 +1381,24 @@ namespace ts.pxtc {
                     return false;
             }
             return true;
+        }
+
+        function recordFieldNames(info: ClassInfo) {
+            return info && info.allfields ? info.allfields.map(f => getName(f)).filter(name => !!name) : [];
+        }
+
+        function recordFieldsText(info: ClassInfo) {
+            return recordFieldNames(info).join(",");
+        }
+
+        function expressionRecordClassInfoWithSource(expr: Expression) {
+            const info = expressionRecordClassInfo(expr);
+            if (info)
+                return { info, source: "provenance" };
+            const contextualInfo = expressionContextualRecordClassInfo(expr);
+            if (contextualInfo)
+                return { info: contextualInfo, source: "contextualType" };
+            return null;
         }
 
         function clearObjectLiteralRecordProvenance() {
@@ -1795,6 +1815,24 @@ namespace ts.pxtc {
                 noteParameterRecordInfo(param, recordInfo);
             markExpressionRecordInterfaceFieldsNeeded(expr, "callArgument");
             return emitted;
+        }
+
+        function traceObjectLiteralRecordInterfaceUse(node: Node, receiver: Expression, memberName: string, isSet: boolean, declKindText: string) {
+            if (!loweringTrace || !bin.finalPass || !objectLiteralRecords || !receiver)
+                return;
+            const recordUse = expressionRecordClassInfoWithSource(receiver);
+            if (!recordUse)
+                return;
+            traceLowering("objectLiteralRecord.interfaceUse", node, [
+                `record=${recordUse.info.id}`,
+                `member=${memberName || ""}`,
+                `fieldPresent=${!!tryGetFieldInfo(recordUse.info, memberName || "")}`,
+                `source=${recordUse.source}`,
+                `declKind=${declKindText || ""}`,
+                `isSet=${!!isSet}`,
+                `receiverType=${typeText(typeOf(receiver))}`,
+                `fields=${recordFieldsText(recordUse.info)}`
+            ]);
         }
 
         function shouldPropagateCallParameterRecords(decl: EmittableAsCall) {
@@ -2822,7 +2860,10 @@ ${lbl}: .short 0xffff
                 }
                 traceLowering("emitPropertyAccess.propertyCall", node, [
                     `declKind=${kindName(decl.kind)}`,
-                    `declName=${declName(decl)}`
+                    `declName=${declName(decl)}`,
+                    recordInfo ? `record=${recordInfo.id}` : "",
+                    recordInfo ? `recordFieldPresent=${!!tryGetFieldInfo(recordInfo, node.name.text)}` : "",
+                    recordInfo ? `source=${recordSource}` : ""
                 ]);
                 return emitCallCore(node, node, [], null, decl as any, node.expression)
             } else if (decl.kind == SK.PropertyDeclaration || decl.kind == SK.Parameter) {
@@ -3343,6 +3384,7 @@ ${lbl}: .short 0xffff
                         `ifaceIndex=${ifaceIndex}`,
                         `noArgs=${!!noArgs}`
                     ]);
+                    traceObjectLiteralRecordInterfaceUse(node, recv, fieldName, noArgs && args.length == 2, "dynamic");
                     // completely dynamic dispatch
                     return mkMethodCall(args.map((x) => emitEscapedExpression(x, "callArgument")), {
                         ifaceIndex,
@@ -3411,6 +3453,7 @@ ${lbl}: .short 0xffff
                     return emitPlain();
                 } else if (needsVCall || target.switches.slowMethods || !forceMethod) {
                     const ifaceIndex = getIfaceMemberId(getName(decl), true);
+                    const isSet = noArgs && args.length == 2;
                     traceLowering("emitCallCore.ifaceCall", node, [
                         `declKind=${kindName(decl.kind)}`,
                         `declName=${declName(decl)}`,
@@ -3418,11 +3461,12 @@ ${lbl}: .short 0xffff
                         `needsVCall=${!!needsVCall}`,
                         `forceMethod=${!!forceMethod}`,
                         `noArgs=${!!noArgs}`,
-                        `isSet=${noArgs && args.length == 2}`
+                        `isSet=${isSet}`
                     ]);
+                    traceObjectLiteralRecordInterfaceUse(node, recv, getName(decl), isSet, kindName(decl.kind));
                     return mkMethodCall(args.map((x) => emitEscapedExpression(x, "callArgument")), {
                         ifaceIndex,
-                        isSet: noArgs && args.length == 2,
+                        isSet,
                         callLocationIndex: markCallLocation(node),
                         noArgs
                     })

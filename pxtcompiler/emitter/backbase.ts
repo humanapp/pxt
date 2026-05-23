@@ -859,14 +859,15 @@ ${baseLabel}_nochk:
 
         private emitIfaceCall(procid: ir.ProcId, numargs: number, getset = "") {
             U.assert(procid.ifaceIndex > 0)
-            this.traceLowering(`emitIfaceCall | ifaceIndex=${procid.ifaceIndex} | numargs=${numargs} | getset=${getset || "call"}`)
             this.write(this.t.emit_int(procid.ifaceIndex, "r1"))
 
-            this.emitLabelledHelper("ifacecall" + numargs + "_" + getset, () => {
+            const helperKey = "ifacecall" + numargs + "_" + getset
+            const helper = this.emitLabelledHelper(helperKey, () => {
                 this.write(`ldr r0, [sp, #0] ; ld-this`)
                 this.loadVTable()
                 this.ifaceCallCore(numargs, getset)
             })
+            this.traceLowering(`emitIfaceCall | ifaceIndex=${procid.ifaceIndex} | numargs=${numargs} | getset=${getset || "call"} | helperKey=${helperKey} | helper=${helper}`)
         }
 
         // vtable in r3; clobber r2
@@ -1117,6 +1118,7 @@ ${baseLabel}_nochk:
             } else {
                 this.write(this.t.call_lbl(this.labelledHelpers[lbl]))
             }
+            return this.labelledHelpers[lbl]
         }
 
         private emitHelper(asm: string, baseName = "hlp") {

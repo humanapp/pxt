@@ -3869,13 +3869,20 @@ ${lbl}: .short 0xffff
                 } else if (needsVCall || target.switches.slowMethods || !forceMethod) {
                     const ifaceIndex = getIfaceMemberId(getName(decl), true);
                     const isSet = noArgs && args.length == 2;
+                    const callKind = isSet ? "set" : noArgs ? "get" : "call";
+                    const recordUse = recv ? expressionRecordClassInfoWithSource(recv) : null;
                     traceLowering("emitCallCore.ifaceCall", node, [
                         `declKind=${kindName(decl.kind)}`,
                         `declName=${declName(decl)}`,
                         `ifaceIndex=${ifaceIndex}`,
+                        `callKind=${callKind}`,
+                        `helperKey=ifacecall${args.length}_${callKind == "call" ? "" : callKind}`,
                         recv ? `receiverShape=${receiverShape(recv)}` : "",
                         recv ? `receiverText=${shortNodeText(recv)}` : "",
                         recv ? `receiverType=${typeText(typeOf(recv))}` : "",
+                        recordUse ? `record=${recordUse.info.id}` : "",
+                        recordUse ? `recordSource=${recordUse.source}` : "",
+                        recordUse ? `recordFieldPresent=${!!tryGetFieldInfo(recordUse.info, getName(decl))}` : "",
                         `needsVCall=${!!needsVCall}`,
                         `forceMethod=${!!forceMethod}`,
                         `noArgs=${!!noArgs}`,

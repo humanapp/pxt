@@ -1040,9 +1040,11 @@ namespace ts.pxtc {
         const objectLiteralRecords = !!(opts.target.switches as any).objectLiteralRecords;
         const objectLiteralRecordClassInfos: pxt.Map<ClassInfo> = {};
         const objectLiteralRecordShapeCounts: pxt.Map<number> = {};
+        const objectLiteralRecordShapeReadCounts: pxt.Map<number> = {};
         const objectLiteralRecordTypeInfos: pxt.Map<ObjectLiteralRecordTypeInfo> = {};
         let objectLiteralRecordClassNo = 0;
         const objectLiteralRecordShapeThreshold = 3;
+        const objectLiteralRecordShapeReadThreshold = 8;
         let objectLiteralRecordProvenanceAnalyzed = false;
         const objectLiteralRecordProvenanceVars: pxt.Map<ClassInfo> = {};
         const objectLiteralRecordProvenanceVarUnknown: pxt.Map<boolean> = {};
@@ -1165,15 +1167,24 @@ namespace ts.pxtc {
         }
 
         function objectLiteralRecordShapeIsProfitable(shapeKey: string) {
-            return bin.finalPass && (objectLiteralRecordShapeCounts[shapeKey] || 0) >= objectLiteralRecordShapeThreshold;
+            return bin.finalPass && objectLiteralRecordShapeIsProfitableCore(shapeKey);
+        }
+
+        function objectLiteralRecordShapeIsProfitableCore(shapeKey: string) {
+            return (objectLiteralRecordShapeCounts[shapeKey] || 0) >= objectLiteralRecordShapeThreshold ||
+                (objectLiteralRecordShapeReadCounts[shapeKey] || 0) >= objectLiteralRecordShapeReadThreshold;
         }
 
         function objectLiteralRecordClassInfoIsProfitable(info: ClassInfo) {
-            return !!info && (!info.recordShapeKey || !bin.finalPass || objectLiteralRecordShapeCount(info) >= objectLiteralRecordShapeThreshold);
+            return !!info && (!info.recordShapeKey || !bin.finalPass || objectLiteralRecordShapeIsProfitableCore(info.recordShapeKey));
         }
 
         function objectLiteralRecordShapeCount(info: ClassInfo) {
             return info && info.recordShapeKey ? objectLiteralRecordShapeCounts[info.recordShapeKey] || 0 : 0;
+        }
+
+        function objectLiteralRecordShapeReadCount(info: ClassInfo) {
+            return info && info.recordShapeKey ? objectLiteralRecordShapeReadCounts[info.recordShapeKey] || 0 : 0;
         }
 
         function analyzeClosedObjectLiteral(node: ObjectLiteralExpression, contextualType: Type) {
@@ -1305,7 +1316,7 @@ namespace ts.pxtc {
 
         function markProfitableObjectLiteralRecordClasses() {
             for (const key of Object.keys(objectLiteralRecordClassInfos)) {
-                if ((objectLiteralRecordShapeCounts[key] || 0) >= objectLiteralRecordShapeThreshold)
+                if (objectLiteralRecordShapeIsProfitableCore(key))
                     markObjectLiteralRecordVTableUsed(objectLiteralRecordClassInfos[key]);
             }
         }
@@ -1327,6 +1338,26 @@ namespace ts.pxtc {
                 `fields=${recordFieldsText(info)}`,
                 `shapeCount=${objectLiteralRecordShapeCount(info) || 0}`
             ]);
+        }
+
+        function traceObjectLiteralRecordShapeReadDemand() {
+            if (!loweringTrace)
+                return;
+            for (const key of Object.keys(objectLiteralRecordClassInfos)) {
+                const count = objectLiteralRecordShapeReadCounts[key] || 0;
+                if (!count)
+                    continue;
+                const info = objectLiteralRecordClassInfos[key];
+                loweringTrace.push([
+                    "objectLiteralRecord.shapeReadDemand",
+                    "<analysis>",
+                    "text=",
+                    `record=${info.id}`,
+                    `fields=${recordFieldsText(info)}`,
+                    `shapeCount=${objectLiteralRecordShapeCounts[key] || 0}`,
+                    `shapeReadCount=${count}`
+                ].join(" | "));
+            }
         }
 
         function markExpressionRecordInterfaceFieldsNeeded(expr: Expression, reason: string) {
@@ -1395,8 +1426,8 @@ namespace ts.pxtc {
             }
             if (expr.kind == SK.CallExpression) {
                 const decl = getDecl((expr as CallExpression).expression);
-                if (decl && decl.kind == SK.FunctionDeclaration) {
-                    const info = getFunctionInfo(decl as FunctionDeclaration);
+                if (decl && shouldPropagateCallRecordReturn(decl as EmittableAsCall)) {
+                    const info = getFunctionInfo(decl as EmittableAsCall);
                     if (!info.recordReturnAmbiguous)
                         return objectLiteralRecordClassInfoIsProfitable(info.recordReturnClassInfo) ? info.recordReturnClassInfo : null;
                 }
@@ -1451,6 +1482,8 @@ namespace ts.pxtc {
                 delete objectLiteralRecordProvenanceReturns[key];
             for (const key of Object.keys(objectLiteralRecordProvenanceReturnUnknown))
                 delete objectLiteralRecordProvenanceReturnUnknown[key];
+            for (const key of Object.keys(objectLiteralRecordShapeReadCounts))
+                delete objectLiteralRecordShapeReadCounts[key];
             objectLiteralRecordProvenanceAnalyzed = false;
         }
 
@@ -1501,6 +1534,7 @@ namespace ts.pxtc {
             let currentVarUnknown: pxt.Map<boolean> = {};
             let currentReturns: pxt.Map<ClassInfo> = {};
             let currentReturnUnknown: pxt.Map<boolean> = {};
+            let currentShapeReadCounts: pxt.Map<number> = {};
 
             function clearMap<T>(map: pxt.Map<T>) {
                 for (const key of Object.keys(map))
@@ -1560,6 +1594,13 @@ namespace ts.pxtc {
                 const nextVarUnknown: pxt.Map<boolean> = {};
                 const nextReturns: pxt.Map<ClassInfo> = {};
                 const nextReturnUnknown: pxt.Map<boolean> = {};
+                const nextShapeReadCounts: pxt.Map<number> = {};
+
+                function noteShapeReadDemand(info: ClassInfo, fieldName: string) {
+                    if (!info || !info.recordShapeKey || !tryGetFieldInfo(info, fieldName))
+                        return;
+                    nextShapeReadCounts[info.recordShapeKey] = (nextShapeReadCounts[info.recordShapeKey] || 0) + 1;
+                }
 
                 function analyzeAction(action: FunctionLikeDeclaration) {
                     const localVars: pxt.Map<ClassInfo> = {};
@@ -1612,7 +1653,7 @@ namespace ts.pxtc {
                             }
                             case SK.CallExpression: {
                                 const decl = getDeclCore((expr as CallExpression).expression);
-                                if (decl && decl.kind == SK.FunctionDeclaration && shouldPropagateCallParameterRecords(decl as FunctionDeclaration)) {
+                                if (decl && shouldPropagateCallRecordReturn(decl as EmittableAsCall)) {
                                     const key = nodeKey(decl);
                                     if (currentReturnUnknown[key])
                                         return null;
@@ -1628,6 +1669,18 @@ namespace ts.pxtc {
                             default:
                                 return null;
                         }
+                    }
+
+                    function contextualTypeFact(expr: Expression): ClassInfo {
+                        if (!expr)
+                            return null;
+                        const key = objectLiteralRecordTypeKey(typeOf(expr));
+                        const info = key && objectLiteralRecordTypeInfos[key];
+                        return info && !info.ambiguous ? info.recordInfo || null : null;
+                    }
+
+                    function readDemandFact(expr: Expression): ClassInfo {
+                        return exprFact(expr) || contextualTypeFact(expr);
                     }
 
                     function invalidateExpression(expr: Expression) {
@@ -1719,6 +1772,12 @@ namespace ts.pxtc {
                                 });
                                 return;
                             case SK.PropertyAccessExpression:
+                                {
+                                    const access = expr as PropertyAccessExpression;
+                                    const decl = getDeclCore(access);
+                                    if (decl && (decl.kind == SK.PropertySignature || decl.kind == SK.PropertyAssignment))
+                                        noteShapeReadDemand(readDemandFact(access.expression), access.name.text);
+                                }
                                 walkExpression((expr as PropertyAccessExpression).expression);
                                 return;
                             case SK.ParenthesizedExpression:
@@ -1801,6 +1860,7 @@ namespace ts.pxtc {
                 currentVarUnknown = nextVarUnknown;
                 currentReturns = nextReturns;
                 currentReturnUnknown = nextReturnUnknown;
+                currentShapeReadCounts = nextShapeReadCounts;
                 return changed;
             }
 
@@ -1811,6 +1871,8 @@ namespace ts.pxtc {
 
             copyRecordFacts(currentVars, currentVarUnknown, objectLiteralRecordProvenanceVars, objectLiteralRecordProvenanceVarUnknown);
             copyRecordFacts(currentReturns, currentReturnUnknown, objectLiteralRecordProvenanceReturns, objectLiteralRecordProvenanceReturnUnknown);
+            for (const key of Object.keys(currentShapeReadCounts))
+                objectLiteralRecordShapeReadCounts[key] = currentShapeReadCounts[key];
             objectLiteralRecordProvenanceAnalyzed = true;
         }
 
@@ -1881,6 +1943,18 @@ namespace ts.pxtc {
                 return false;
             const info = getFunctionInfo(decl as FunctionDeclaration);
             return !info.usedAsValue;
+        }
+
+        function shouldPropagateCallRecordReturn(decl: EmittableAsCall) {
+            if (!objectLiteralRecords || !decl)
+                return false;
+            if (decl.kind == SK.FunctionDeclaration)
+                return shouldPropagateCallParameterRecords(decl);
+            if (decl.kind == SK.MethodDeclaration) {
+                const info = getFunctionInfo(decl as MethodDeclaration);
+                return !info.usedAsValue && !info.virtualParent;
+            }
+            return false;
         }
 
         function noteParameterRecordFieldRead(expr: Expression, fieldName: string) {
@@ -1980,6 +2054,8 @@ namespace ts.pxtc {
         }
 
         analyzeObjectLiteralRecordProvenance();
+        markProfitableObjectLiteralRecordClasses()
+        traceObjectLiteralRecordShapeReadDemand();
 
         layOutGlobals()
         needsUsingInfo = false
@@ -2786,7 +2862,8 @@ ${lbl}: .short 0xffff
                 traceLowering("emitObjectLiteral.record", node, [
                     `contextualType=${typeText(contextualType)}`,
                     `fields=${recordCandidate.fields.join(",")}`,
-                    `shapeCount=${objectLiteralRecordShapeCounts[recordCandidate.shapeKey] || 0}`
+                    `shapeCount=${objectLiteralRecordShapeCounts[recordCandidate.shapeKey] || 0}`,
+                    `shapeReadCount=${objectLiteralRecordShapeReadCounts[recordCandidate.shapeKey] || 0}`
                 ]);
                 return emitObjectLiteralRecord(node, recordCandidate);
             }

@@ -5342,7 +5342,17 @@ ${lbl}: .short 0xffff
         function emitExpressionStatement(node: ExpressionStatement) {
             emitExprAsStmt(node.expression)
         }
-        function emitCondition(expr: Expression, inner: ir.Expr = null) {
+        function emitCondition(expr: Expression, inner: ir.Expr = null): ir.Expr {
+            if (!inner && !isStackMachine() && expr.kind == SK.PrefixUnaryExpression) {
+                const unary = expr as PrefixUnaryExpression;
+                if (unary.operator == SK.ExclamationToken) {
+                    traceLowering("emitCondition.booleanNotDirect", expr, [
+                        `operandKind=${kindName(unary.operand.kind)}`,
+                        `operandType=${typeText(typeOf(unary.operand))}`
+                    ]);
+                    return ir.rtcall("Boolean_::bang", [emitCondition(unary.operand)])
+                }
+            }
             if (!inner && isThumb() && expr.kind == SK.BinaryExpression) {
                 let be = expr as BinaryExpression
                 let mapped = U.lookup(thumbCmpMap, simpleInstruction(be, be.operatorToken.kind))

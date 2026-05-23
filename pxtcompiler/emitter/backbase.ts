@@ -997,6 +997,8 @@ ${baseLabel}_nochk:
 
         private emitRtCall(topExpr: ir.Expr, genCall: () => void = null) {
             let name: string = topExpr.data
+            const mapSetFieldId = this.mapSetByFieldId(topExpr)
+            const specializeMapSetFieldId = mapSetFieldId !== undefined && this.shouldSpecializeMapSetByFieldId(mapSetFieldId)
 
             if (name == "pxt::beginTry") {
                 return this.emitBeginTry(topExpr)
@@ -1011,6 +1013,8 @@ ${baseLabel}_nochk:
                 isRef: (maskInfo.refMask & (1 << i)) != 0,
                 conv: convs.find(c => c.argIdx == i)
             }))
+            if (specializeMapSetFieldId)
+                allArgs = allArgs.filter(a => a.idx != 1)
 
             U.assert(allArgs.length <= 4)
 
@@ -1117,7 +1121,9 @@ ${baseLabel}_nochk:
             if (genCall) {
                 genCall()
             } else {
-                if (name != "langsupp::ignore")
+                if (specializeMapSetFieldId)
+                    this.emitMapSetByFieldIdCall(mapSetFieldId)
+                else if (name != "langsupp::ignore")
                     this.alignedCall(name, "", 0, true)
             }
 
@@ -1125,6 +1131,34 @@ ${baseLabel}_nochk:
                 this.clearArgs(complexArgs.filter(a => !a.isRef).map(a => a.expr),
                     complexArgs.filter(a => a.isRef).map(a => a.expr))
             }
+        }
+
+        private mapSetByFieldId(topExpr: ir.Expr) {
+            if (topExpr.data != "pxtrt::mapSet" || topExpr.args.length != 3)
+                return undefined
+            const fieldId = topExpr.args[1]
+            if (fieldId.exprKind != ir.EK.NumberLiteral || typeof fieldId.data != "number")
+                return undefined
+            return fieldId.data as number
+        }
+
+        private shouldSpecializeMapSetByFieldId(fieldId: number) {
+            if (!isThumb() || !this.bin.finalPass)
+                return false
+            return (this.bin.mapSetByFieldIdCounts[fieldId + ""] || 0) >= 3
+        }
+
+        private emitMapSetByFieldIdCall(fieldId: number) {
+            const count = this.bin.mapSetByFieldIdCounts[fieldId + ""] || 0
+            const helper = this.ensureLabelledHelper("mapset_i" + fieldId, () => {
+                this.write(this.t.helper_prologue())
+                this.write(this.t.emit_int(fieldId, "r1"))
+                this.markThumbHelper("pxtrt::mapSet")
+                this.write(this.t.callCPP("pxtrt::mapSet"))
+                this.write(this.t.helper_epilogue())
+            })
+            this.traceLowering(`emitMapSetByFieldId | fieldId=${fieldId} | helper=${helper} | specialized=true | count=${count}`)
+            this.write(this.t.call_lbl(helper, false, this.stackAlignmentNeeded(0)))
         }
 
         private alignedCall(name: string, cmt = "", off = 0, saveStack = false) {

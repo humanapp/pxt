@@ -2402,6 +2402,7 @@ namespace ts.pxtc {
         needsUsingInfo = false
         bin.finalPass = true
         bin.ifaceCallCounts = {}
+        bin.mapSetByFieldIdCounts = {}
         bin.dynamicIfaceCalls = {}
         emit(rootFunction)
         markExactIfaceWrappers()
@@ -3250,8 +3251,11 @@ ${lbl}: .short 0xffff
                     if (isRefCountedExpr(p.initializer))
                         mask |= 1 << 2
                 }
+                const nativeFieldId = target.isNative ? getIfaceMemberId(keyName) : undefined;
+                if (nativeFieldId !== undefined)
+                    bin.mapSetByFieldIdCounts[nativeFieldId + ""] = (bin.mapSetByFieldIdCounts[nativeFieldId + ""] || 0) + 1;
                 const fieldId = target.isNative
-                    ? ir.numlit(getIfaceMemberId(keyName))
+                    ? ir.numlit(nativeFieldId)
                     : ir.ptrlit(null, JSON.stringify(keyName))
                 const args = [
                     expr,
@@ -6759,6 +6763,7 @@ ${lbl}: .short 0xffff
         ifaceMemberMap: pxt.Map<number> = {};
         ifaceMembers: string[];
         ifaceCallCounts: pxt.Map<number> = {};
+        mapSetByFieldIdCounts: pxt.Map<number> = {};
         dynamicIfaceCalls: pxt.Map<boolean> = {};
         strings: pxt.Map<string> = {};
         hexlits: pxt.Map<string> = {};

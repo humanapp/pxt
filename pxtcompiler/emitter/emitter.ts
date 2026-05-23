@@ -1149,6 +1149,14 @@ namespace ts.pxtc {
             }
         }
 
+        function classInfoName(info: ClassInfo) {
+            return info ? info.id || "" : "";
+        }
+
+        function traceValidationCheck(reason: string, node?: Node, details?: string[]) {
+            traceLowering("emitValidationCheck." + reason, node, details);
+        }
+
         function objectLiteralPropertyName(p: ObjectLiteralElementLike) {
             if (p.kind == SK.SpreadAssignment)
                 return undefined;
@@ -3025,6 +3033,17 @@ ${lbl}: .short 0xffff
                         // Reading a shimmed property
                         return emitShim(fld, decl, [node.expression])
                     } else {
+                        if (idx.needsCheck && !target.switches.skipClassCheck) {
+                            traceValidationCheck("fieldAccess", node, [
+                                `declKind=${kindName(decl.kind)}`,
+                                `declName=${declName(decl)}`,
+                                `class=${classInfoName(idx.classInfo)}`,
+                                `field=${idx.name}`,
+                                `receiverShape=${receiverShape(node.expression)}`,
+                                `receiverText=${shortNodeText(node.expression)}`,
+                                `receiverType=${typeText(typeOf(node.expression))}`
+                            ]);
+                        }
                         traceLowering("emitPropertyAccess.fieldAccess", node, [
                             `declKind=${kindName(decl.kind)}`,
                             `declName=${declName(decl)}`
@@ -3556,6 +3575,16 @@ ${lbl}: .short 0xffff
                     }
 
                     U.assert(!bin.finalPass || info.virtualIndex != null, "!bin.finalPass || info.virtualIndex != null")
+                    if (args[0].kind != SK.ThisKeyword && !target.switches.skipClassCheck) {
+                        traceValidationCheck("virtualReceiver", node, [
+                            `declKind=${kindName(decl.kind)}`,
+                            `declName=${declName(decl)}`,
+                            `class=${classInfoName(info.parentClassInfo)}`,
+                            recv ? `receiverShape=${receiverShape(recv)}` : "",
+                            recv ? `receiverText=${shortNodeText(recv)}` : "",
+                            recv ? `receiverType=${typeText(typeOf(recv))}` : ""
+                        ]);
+                    }
                     return mkMethodCall(args.map((x) => emitEscapedExpression(x, "callArgument")), {
                         classInfo: info.parentClassInfo,
                         virtualIndex: info.virtualIndex,
@@ -4538,6 +4567,18 @@ ${lbl}: .short 0xffff
                                 proc.emitExpr(emitCallCore(trg, trg, [src], null, decl as FunctionLikeDeclaration))
                                 break;
                             }
+                            if (idx.needsCheck && !target.switches.skipClassCheck) {
+                                const pacc = trg as PropertyAccessExpression;
+                                traceValidationCheck("fieldStore", trg, [
+                                    decl ? `declKind=${kindName(decl.kind)}` : "",
+                                    decl ? `declName=${declName(decl)}` : "",
+                                    `class=${classInfoName(idx.classInfo)}`,
+                                    `field=${idx.name}`,
+                                    `receiverShape=${receiverShape(pacc.expression)}`,
+                                    `receiverText=${shortNodeText(pacc.expression)}`,
+                                    `receiverType=${typeText(typeOf(pacc.expression))}`
+                                ]);
+                            }
                         }
                         let trg2 = emitExpr(trg)
                         proc.emitExpr(ir.op(EK.Store, [trg2, emitEscapedExpression(src, "assignment")]))
@@ -4976,6 +5017,14 @@ ${lbl}: .short 0xffff
                 } else if (f[0] == "_" || f == "T" || f == "N") {
                     let t = getRefTagToValidate(f)
                     if (t) {
+                        traceValidationCheck("runtimeCallArgument", a, [
+                            `shim=${name}`,
+                            `argIndex=${i}`,
+                            `refTag=${t}`,
+                            `nullable=${!!attrs.argsNullable}`,
+                            `argShape=${receiverShape(a)}`,
+                            `argType=${typeText(typeOf(a))}`
+                        ]);
                         convInfos.push({
                             argIdx: i,
                             method: "_validate",
@@ -5904,7 +5953,15 @@ ${lbl}: .short 0xffff
             let exres: ir.Expr
             if (isPossiblyGenericClassType(objType)) {
                 const info = getClassInfo(objType)
-                exres = ir.op(EK.FieldAccess, [objRef], fieldIndexCore(info, getFieldInfo(info, fieldName)))
+                const idx = fieldIndexCore(info, getFieldInfo(info, fieldName))
+                if (idx.needsCheck && !target.switches.skipClassCheck) {
+                    traceValidationCheck("bindingFieldAccess", node, [
+                        `class=${classInfoName(idx.classInfo)}`,
+                        `field=${idx.name}`,
+                        `receiverType=${typeText(objType)}`
+                    ]);
+                }
+                exres = ir.op(EK.FieldAccess, [objRef], idx)
             } else {
                 exres = mkMethodCall([objRef], {
                     ifaceIndex: getIfaceMemberId(fieldName, true),

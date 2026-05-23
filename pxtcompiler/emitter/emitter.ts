@@ -4344,6 +4344,10 @@ ${lbl}: .short 0xffff
 
             switch (node.operator) {
                 case SK.ExclamationToken:
+                    traceLowering("emitBooleanNot", node, [
+                        `operandKind=${kindName(node.operand.kind)}`,
+                        `operandType=${typeText(typeOf(node.operand))}`
+                    ]);
                     return fromBool(ir.rtcall("Boolean_::bang", [emitCondition(node.operand)]))
                 case SK.PlusPlusToken:
                     return emitIncrement(node.operand, "numops::adds", false)
@@ -4355,6 +4359,11 @@ ${lbl}: .short 0xffff
                     let v = valueToInt(inner)
                     if (v != null)
                         return emitLit(-v)
+                    traceLowering("emitUnaryNumericOp", node, [
+                        `operator=${kindName(node.operator)}`,
+                        `operandKind=${kindName(node.operand.kind)}`,
+                        `operandType=${typeText(typeOf(node.operand))}`
+                    ]);
                     if (node.operator == SK.MinusToken)
                         return emitIntOp("numops::subs", emitLit(0), inner)
                     else
@@ -5023,11 +5032,19 @@ ${lbl}: .short 0xffff
             r.mask.conversions = convInfos
             if (opts.target.isNative) {
                 let f0 = fmt[0]
-                if (f0 == "I")
+                if (f0 == "I") {
+                    traceLowering("emitRuntimeReturnConversion", args[0], [
+                        "conversion=fromInt",
+                        `shim=${name}`
+                    ]);
                     r = fromInt(r)
-                else if (f0 == "B")
+                } else if (f0 == "B") {
+                    traceLowering("emitRuntimeReturnConversion", args[0], [
+                        "conversion=fromBool",
+                        `shim=${name}`
+                    ]);
                     r = fromBool(r)
-                else if (f0 == "F")
+                } else if (f0 == "F")
                     r = fromFloat(r)
                 else if (f0 == "D") {
                     U.oops("double returns not yet supported") // take two words
@@ -5062,6 +5079,13 @@ ${lbl}: .short 0xffff
             let lbl = proc.mkLabel("lazy")
 
             left = ir.shared(left)
+            traceLowering("emitLazyBinary.toBool", node, [
+                `operator=${kindName(node.operatorToken.kind)}`,
+                `leftKind=${kindName(node.left.kind)}`,
+                `leftType=${typeText(typeOf(node.left))}`,
+                `rightKind=${kindName(node.right.kind)}`,
+                `rightType=${typeText(typeOf(node.right))}`
+            ]);
             let cond = ir.rtcall("numops::toBool", [left])
             let lblSkip = proc.mkLabel("lazySkip")
             let mode: ir.JmpMode =
@@ -5202,7 +5226,17 @@ ${lbl}: .short 0xffff
             }
 
             let shim = (n: string) => {
+                const originalName = n;
                 n = mapIntOpName(n)
+                traceLowering("emitNumericOp", node, [
+                    `op=${n}`,
+                    `originalOp=${originalName}`,
+                    `operator=${kindName(node.operatorToken.kind)}`,
+                    `leftKind=${kindName(node.left.kind)}`,
+                    `leftType=${typeText(typeOf(node.left))}`,
+                    `rightKind=${kindName(node.right.kind)}`,
+                    `rightType=${typeText(typeOf(node.right))}`
+                ]);
                 let args = [node.left, node.right]
                 return ir.rtcallMask(n, getMask(args), ir.CallingConvention.Plain, args.map(x => emitExpr(x)))
             }
@@ -5313,6 +5347,14 @@ ${lbl}: .short 0xffff
                 let be = expr as BinaryExpression
                 let mapped = U.lookup(thumbCmpMap, simpleInstruction(be, be.operatorToken.kind))
                 if (mapped) {
+                    traceLowering("emitCondition.thumbCompare", expr, [
+                        `op=${mapped}`,
+                        `operator=${kindName(be.operatorToken.kind)}`,
+                        `leftKind=${kindName(be.left.kind)}`,
+                        `leftType=${typeText(typeOf(be.left))}`,
+                        `rightKind=${kindName(be.right.kind)}`,
+                        `rightType=${typeText(typeOf(be.right))}`
+                    ]);
                     return ir.rtcall(mapped, [emitExpr(be.left), emitExpr(be.right)])
                 }
             }
@@ -5320,6 +5362,10 @@ ${lbl}: .short 0xffff
                 inner = emitExpr(expr)
             if (isStackMachine())
                 return inner
+            traceLowering("emitCondition.toBoolDecr", expr, [
+                `exprKind=${kindName(expr.kind)}`,
+                `exprType=${typeText(typeOf(expr))}`
+            ]);
             return ir.rtcall("numops::toBoolDecr", [inner])
         }
         function emitIfStatement(node: IfStatement) {
@@ -5578,6 +5624,13 @@ ${lbl}: .short 0xffff
                     // switch_eq() will decr(expr) if result is true
                     let cmpCall = ir.rtcallMask(mapIntOpName("pxt::switch_eq"),
                         mask, ir.CallingConvention.Plain, [cmpExpr, expr])
+                    traceLowering("emitSwitchCompare", cc.expression, [
+                        `op=${mapIntOpName("pxt::switch_eq")}`,
+                        `caseKind=${kindName(cc.expression.kind)}`,
+                        `caseType=${typeText(typeOf(cc.expression))}`,
+                        `switchType=${typeText(typeOf(node.expression))}`,
+                        `mask=${mask}`
+                    ]);
                     proc.emitJmp(lbl, cmpCall, ir.JmpMode.IfNotZero, expr)
                 } else if (cl.kind == SK.DefaultClause) {
                     // Save default label for emit at the end of the

@@ -5343,6 +5343,36 @@ ${lbl}: .short 0xffff
             emitExprAsStmt(node.expression)
         }
         function emitCondition(expr: Expression, inner: ir.Expr = null): ir.Expr {
+            if (!inner && !isStackMachine() && expr.kind == SK.BinaryExpression) {
+                const binary = expr as BinaryExpression;
+                const op = binary.operatorToken.kind;
+                if (op == SK.AmpersandAmpersandToken || op == SK.BarBarToken) {
+                    traceLowering("emitCondition.lazyBooleanDirect", expr, [
+                        `operator=${kindName(op)}`,
+                        `leftKind=${kindName(binary.left.kind)}`,
+                        `leftType=${typeText(typeOf(binary.left))}`,
+                        `rightKind=${kindName(binary.right.kind)}`,
+                        `rightType=${typeText(typeOf(binary.right))}`
+                    ]);
+                    const shortCircuitLabel = proc.mkLabel("lazycond");
+                    const doneLabel = proc.mkLabel("lazycondfin");
+                    if (op == SK.AmpersandAmpersandToken) {
+                        proc.emitJmp(shortCircuitLabel, emitCondition(binary.left), ir.JmpMode.IfZero);
+                        proc.emitJmp(shortCircuitLabel, emitCondition(binary.right), ir.JmpMode.IfZero);
+                        proc.emitJmp(doneLabel, ir.numlit(1), ir.JmpMode.Always);
+                        proc.emitLbl(shortCircuitLabel);
+                        proc.emitJmp(doneLabel, ir.numlit(0), ir.JmpMode.Always);
+                    } else {
+                        proc.emitJmp(shortCircuitLabel, emitCondition(binary.left), ir.JmpMode.IfNotZero);
+                        proc.emitJmp(shortCircuitLabel, emitCondition(binary.right), ir.JmpMode.IfNotZero);
+                        proc.emitJmp(doneLabel, ir.numlit(0), ir.JmpMode.Always);
+                        proc.emitLbl(shortCircuitLabel);
+                        proc.emitJmp(doneLabel, ir.numlit(1), ir.JmpMode.Always);
+                    }
+                    proc.emitLbl(doneLabel);
+                    return captureJmpValue();
+                }
+            }
             if (!inner && !isStackMachine() && expr.kind == SK.PrefixUnaryExpression) {
                 const unary = expr as PrefixUnaryExpression;
                 if (unary.operator == SK.ExclamationToken) {

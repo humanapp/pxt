@@ -25,6 +25,7 @@ namespace ts.pxtc {
         "numops::lsrs": "_numops_lsrs",
         "pxt::toInt": "_numops_toInt",
         "pxt::fromInt": "_numops_fromInt",
+        "pxt::switch_eq": "_pxt_switch_eq",
     }
 
     // snippets for ARM Thumb assembly
@@ -355,6 +356,26 @@ _cmp_${op}:
                         cmp r0, #0`)
             }
 
+            r += `
+.section code
+.object _pxt_helper_switch_eq
+_pxt_switch_eq:
+    @scope _pxt_switch_eq
+    lsls r2, r0, #31
+    beq .boxed
+    lsls r2, r1, #31
+    beq .boxed
+    cmp r0, r1
+    beq .true
+.false:
+    movs r0, #0
+    bx lr
+.true:
+    movs r0, #1
+    bx lr
+`
+            r += boxedOp(`bl pxt::switch_eq`)
+
             return r
         }
 
@@ -435,4 +456,3 @@ _cmp_${op}:
         }
     }
 }
-

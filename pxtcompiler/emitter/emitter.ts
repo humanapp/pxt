@@ -193,19 +193,6 @@ namespace ts.pxtc {
     export interface FieldWithAddInfo extends NamedDeclaration {
     }
 
-    interface ObjectLiteralRecordCandidate {
-        eligible: boolean;
-        reason: string;
-        fields: string[];
-        fieldDecls: pxt.Map<FieldWithAddInfo>;
-        shapeKey: string;
-    }
-
-    interface ObjectLiteralRecordTypeInfo {
-        recordInfo?: ClassInfo;
-        ambiguous?: boolean;
-    }
-
     type TemplateLiteralFragment = TemplateHead | TemplateMiddle | TemplateTail;
     export type EmittableAsCall = FunctionLikeDeclaration | SignatureDeclaration | ObjectLiteralElementLike | PropertySignature | ModuleDeclaration
         | ParameterDeclaration | PropertyDeclaration;
@@ -562,8 +549,6 @@ namespace ts.pxtc {
         itable?: ITableEntry[];
         ctor?: ir.Procedure;
         toStringMethod?: ir.Procedure;
-        recordShapeKey?: string;
-        recordNeedsInterfaceFields?: boolean;
 
         constructor(public id: string, public decl: ClassDeclaration) {
             this.attrs = parseComments(decl)
@@ -949,9 +934,6 @@ namespace ts.pxtc {
         captured?: boolean;
         written?: boolean;
         functionsToDefine?: FunctionDeclaration[];
-        recordClassInfo?: ClassInfo;
-        recordClassInfoAmbiguous?: boolean;
-        recordReadFields?: pxt.Map<boolean>;
     }
 
     export class FunctionAddInfo {
@@ -966,8 +948,6 @@ namespace ts.pxtc {
         usedAsValue?: boolean;
         usedAsIface?: boolean;
         alreadyEmitted?: boolean;
-        recordReturnClassInfo?: ClassInfo;
-        recordReturnAmbiguous?: boolean;
 
         constructor(public decl: EmittableAsCall) { }
 
@@ -1037,19 +1017,6 @@ namespace ts.pxtc {
 
         let bin = new Binary()
         let proc: ir.Procedure;
-        const objectLiteralRecords = false;
-        const objectLiteralRecordClassInfos: pxt.Map<ClassInfo> = {};
-        const objectLiteralRecordShapeCounts: pxt.Map<number> = {};
-        const objectLiteralRecordShapeReadCounts: pxt.Map<number> = {};
-        const objectLiteralRecordTypeInfos: pxt.Map<ObjectLiteralRecordTypeInfo> = {};
-        let objectLiteralRecordClassNo = 0;
-        const objectLiteralRecordShapeThreshold = 3;
-        const objectLiteralRecordShapeReadThreshold = 8;
-        let objectLiteralRecordProvenanceAnalyzed = false;
-        const objectLiteralRecordProvenanceVars: pxt.Map<ClassInfo> = {};
-        const objectLiteralRecordProvenanceVarUnknown: pxt.Map<boolean> = {};
-        const objectLiteralRecordProvenanceReturns: pxt.Map<ClassInfo> = {};
-        const objectLiteralRecordProvenanceReturnUnknown: pxt.Map<boolean> = {};
         const concreteClassFieldInfos: pxt.Map<ClassInfo> = {};
         const concreteClassFieldUnknown: pxt.Map<boolean> = {};
         bin.trace = opts.trace;
@@ -1291,196 +1258,6 @@ namespace ts.pxtc {
             return "";
         }
 
-        function objectLiteralPropertyName(p: ObjectLiteralElementLike) {
-            if (p.kind == SK.SpreadAssignment)
-                return undefined;
-            const name = (p as PropertyAssignment | ShorthandPropertyAssignment | MethodDeclaration | AccessorDeclaration).name;
-            if (!name || name.kind == SK.ComputedPropertyName)
-                return undefined;
-            if (name.kind == SK.Identifier || name.kind == SK.StringLiteral || name.kind == SK.NumericLiteral)
-                return (name as Identifier | StringLiteral | NumericLiteral).text;
-            return undefined;
-        }
-
-        function objectLiteralRecordShapeKey(fields: string[]) {
-            const keyFields = fields.slice(0);
-            keyFields.sort(U.strcmp);
-            return keyFields.join("\n");
-        }
-
-        function objectLiteralRecordShapeIsProfitable(shapeKey: string) {
-            return bin.finalPass && objectLiteralRecordShapeIsProfitableCore(shapeKey);
-        }
-
-        function objectLiteralRecordShapeIsProfitableCore(shapeKey: string) {
-            return (objectLiteralRecordShapeCounts[shapeKey] || 0) >= objectLiteralRecordShapeThreshold ||
-                ((objectLiteralRecordShapeCounts[shapeKey] || 0) >= 2 && objectLiteralRecordShapeFieldCount(shapeKey) >= 5) ||
-                (objectLiteralRecordShapeReadCounts[shapeKey] || 0) >= objectLiteralRecordShapeReadThreshold;
-        }
-
-        function objectLiteralRecordShapeFieldCount(shapeKey: string) {
-            return shapeKey ? shapeKey.split("\n").length : 0;
-        }
-
-        function objectLiteralRecordClassInfoIsProfitable(info: ClassInfo) {
-            return !!info && (!info.recordShapeKey || !bin.finalPass || objectLiteralRecordShapeIsProfitableCore(info.recordShapeKey));
-        }
-
-        function objectLiteralRecordShapeCount(info: ClassInfo) {
-            return info && info.recordShapeKey ? objectLiteralRecordShapeCounts[info.recordShapeKey] || 0 : 0;
-        }
-
-        function objectLiteralRecordShapeReadCount(info: ClassInfo) {
-            return info && info.recordShapeKey ? objectLiteralRecordShapeReadCounts[info.recordShapeKey] || 0 : 0;
-        }
-
-        function analyzeClosedObjectLiteral(node: ObjectLiteralExpression, contextualType: Type) {
-            function reject(reason: string): ObjectLiteralRecordCandidate {
-                return { eligible: false, reason, fields: [] as string[], fieldDecls: {} as pxt.Map<FieldWithAddInfo>, shapeKey: "" };
-            }
-
-            if (!contextualType)
-                return reject("noContextualType");
-            if (contextualType.flags & TypeFlags.Union) {
-                const union = contextualType as UnionType;
-                const structuralArms = (union.types || []).filter(objectLiteralUnionRecordContextArm);
-                if (structuralArms.length != 1)
-                    return reject(structuralArms.length ? "unionMultipleStructuralArms" : "unionNoStructuralArm");
-
-                const candidate = analyzeClosedObjectLiteralForType(node, structuralArms[0]);
-                return candidate.eligible ? candidate : reject("unionNoMatchingArm");
-            }
-            return analyzeClosedObjectLiteralForType(node, contextualType);
-        }
-
-        function objectLiteralUnionRecordContextArm(contextualType: Type) {
-            if (!isInterfaceType(contextualType))
-                return false;
-
-            const contextProperties = checker.getPropertiesOfType(contextualType);
-            return !!(contextProperties && contextProperties.length);
-        }
-
-        function analyzeClosedObjectLiteralForType(node: ObjectLiteralExpression, contextualType: Type) {
-            const fields: string[] = [];
-            const fieldDecls: pxt.Map<FieldWithAddInfo> = {};
-            const reject = (reason: string) => ({ eligible: false, reason, fields, fieldDecls, shapeKey: "" });
-
-            if (!isInterfaceType(contextualType))
-                return reject("contextualTypeNotStructural");
-
-            const contextProperties = checker.getPropertiesOfType(contextualType);
-            if (!contextProperties || !contextProperties.length)
-                return reject("noContextualProperties");
-
-            const contextByName: pxt.Map<Symbol> = {};
-            for (const prop of contextProperties) {
-                contextByName[prop.name] = prop;
-            }
-
-            const seen: pxt.Map<boolean> = {};
-            for (const prop of node.properties) {
-                if (prop.kind != SK.PropertyAssignment && prop.kind != SK.ShorthandPropertyAssignment)
-                    return reject("unsupportedPropertyKind:" + kindName(prop.kind));
-                if ((prop as PropertyAssignment | ShorthandPropertyAssignment).questionToken)
-                    return reject("optionalLiteralProperty");
-
-                const name = objectLiteralPropertyName(prop);
-                if (!name)
-                    return reject("computedOrUnsupportedName");
-                if (prop.name.kind != SK.Identifier)
-                    return reject("unsupportedRecordFieldName:" + name);
-                if (seen[name])
-                    return reject("duplicateProperty:" + name);
-                if (!U.lookup(contextByName, name))
-                    return reject("extraProperty:" + name);
-
-                seen[name] = true;
-                fields.push(name);
-                fieldDecls[name] = prop as any;
-            }
-
-            for (const prop of contextProperties) {
-                if (!seen[prop.name] && !(prop.flags & SymbolFlags.Optional))
-                    return reject("missingProperty:" + prop.name);
-            }
-            if (!fields.length)
-                return reject("noRecordFields");
-
-            return { eligible: true, reason: "accepted", fields, fieldDecls, shapeKey: objectLiteralRecordShapeKey(fields) };
-        }
-
-        function getObjectLiteralRecordClassInfo(node: ObjectLiteralExpression, candidate: ObjectLiteralRecordCandidate) {
-            const key = candidate.shapeKey;
-            let info = objectLiteralRecordClassInfos[key];
-            if (!info) {
-                info = new ClassInfo("ObjectLiteralRecord__S" + objectLiteralRecordClassNo++, node as any);
-                info.recordShapeKey = key;
-                info.allfields = candidate.fields.map(field => candidate.fieldDecls[field]);
-                objectLiteralRecordClassInfos[key] = info;
-            }
-            pxtInfo(node).classInfo = info;
-            return info;
-        }
-
-        function objectLiteralRecordTypeKey(type: Type) {
-            if (!type)
-                return "";
-            const sym = type.symbol;
-            const decl = sym && sym.valueDeclaration;
-            return decl ? nodeKey(decl) : typeText(type);
-        }
-
-        function noteObjectLiteralRecordTypeInfo(type: Type, recordInfo: ClassInfo) {
-            const key = objectLiteralRecordTypeKey(type);
-            if (!key)
-                return;
-            let info = objectLiteralRecordTypeInfos[key];
-            if (!info)
-                info = objectLiteralRecordTypeInfos[key] = {};
-            if (info.ambiguous)
-                return;
-            if (!recordInfo) {
-                info.recordInfo = null;
-                info.ambiguous = true;
-            } else if (!info.recordInfo) {
-                info.recordInfo = recordInfo;
-            } else if (info.recordInfo != recordInfo) {
-                info.recordInfo = null;
-                info.ambiguous = true;
-            }
-        }
-
-        function expressionContextualRecordClassInfo(expr: Expression) {
-            if (!objectLiteralRecords || !expr || !bin.finalPass)
-                return null;
-            const key = objectLiteralRecordTypeKey(typeOf(expr));
-            const info = key && objectLiteralRecordTypeInfos[key];
-            if (!info || info.ambiguous || !info.recordInfo)
-                return null;
-            return objectLiteralRecordClassInfoIsProfitable(info.recordInfo) ? info.recordInfo : null;
-        }
-
-        function markProfitableObjectLiteralRecordClasses() {
-            for (const key of Object.keys(objectLiteralRecordClassInfos)) {
-                if (objectLiteralRecordShapeIsProfitableCore(key))
-                    markObjectLiteralRecordVTableUsed(objectLiteralRecordClassInfos[key]);
-            }
-        }
-
-        function markObjectLiteralRecordVTableUsed(info: ClassInfo) {
-            if (info.isUsed)
-                return;
-            pxtInfo(info.decl).flags |= PxtNodeFlags.IsUsed;
-            bin.usedClassInfos.push(info);
-        }
-
-        function markObjectLiteralRecordInterfaceFieldsNeeded(info: ClassInfo, node: Node, reason: string) {
-            if (!info || !info.recordShapeKey)
-                return;
-            info.recordNeedsInterfaceFields = true;
-        }
-
         function ifaceCallKindCounts(ifaceIndex: number, getset: string) {
             const suffix = ":" + (getset || "call");
             return Object.keys(bin.ifaceCallCounts)
@@ -1540,595 +1317,8 @@ namespace ts.pxtc {
             }
         }
 
-        function markExpressionRecordInterfaceFieldsNeeded(expr: Expression, reason: string) {
-            if (!objectLiteralRecords || !expr)
-                return;
-            const info = expressionRecordClassInfo(expr);
-            if (info)
-                markObjectLiteralRecordInterfaceFieldsNeeded(info, expr, reason);
-            switch (expr.kind) {
-                case SK.ObjectLiteralExpression:
-                    (expr as ObjectLiteralExpression).properties.forEach(prop => {
-                        if (prop.kind == SK.PropertyAssignment)
-                            markExpressionRecordInterfaceFieldsNeeded((prop as PropertyAssignment).initializer, reason);
-                        else if (prop.kind == SK.SpreadAssignment)
-                            markExpressionRecordInterfaceFieldsNeeded((prop as SpreadAssignment).expression, reason);
-                    });
-                    break;
-                case SK.ArrayLiteralExpression:
-                    (expr as ArrayLiteralExpression).elements.forEach(elt => markExpressionRecordInterfaceFieldsNeeded(elt, reason));
-                    break;
-                case SK.ParenthesizedExpression:
-                    markExpressionRecordInterfaceFieldsNeeded((expr as ParenthesizedExpression).expression, reason);
-                    break;
-                case SK.AsExpression:
-                case SK.TypeAssertionExpression:
-                    markExpressionRecordInterfaceFieldsNeeded((expr as AssertionExpression).expression, reason);
-                    break;
-                case SK.ConditionalExpression:
-                    markExpressionRecordInterfaceFieldsNeeded((expr as ConditionalExpression).whenTrue, reason);
-                    markExpressionRecordInterfaceFieldsNeeded((expr as ConditionalExpression).whenFalse, reason);
-                    break;
-            }
-        }
-
         function emitEscapedExpression(expr: Expression, reason: string) {
-            const emitted = emitExpr(expr);
-            markExpressionRecordInterfaceFieldsNeeded(expr, reason);
-            return emitted;
-        }
-
-        function expressionRecordClassInfo(expr: Expression) {
-            if (!objectLiteralRecords || !expr)
-                return null;
-            const provenanceInfo = recordProvenanceExprClassInfo(expr);
-            if (provenanceInfo !== undefined)
-                return objectLiteralRecordClassInfoIsProfitable(provenanceInfo) ? provenanceInfo : null;
-            if (expr.kind == SK.ObjectLiteralExpression) {
-                const info = pxtInfo(expr).classInfo || null;
-                return objectLiteralRecordClassInfoIsProfitable(info) ? info : null;
-            }
-            if (expr.kind == SK.Identifier) {
-                const decl = getDecl(expr);
-                if (decl && (decl.kind == SK.VariableDeclaration || decl.kind == SK.Parameter || decl.kind == SK.BindingElement)) {
-                    const info = availableVarRecordClassInfo(decl as VarOrParam);
-                    return objectLiteralRecordClassInfoIsProfitable(info) ? info : null;
-                }
-                return null;
-            }
-            if (expr.kind == SK.PropertyAccessExpression) {
-                const decl = getDecl(expr);
-                if (decl && decl.kind == SK.PropertyDeclaration) {
-                    const info = availableVarRecordClassInfo(decl as PropertyDeclaration);
-                    return objectLiteralRecordClassInfoIsProfitable(info) ? info : null;
-                }
-                return null;
-            }
-            if (expr.kind == SK.CallExpression) {
-                const decl = getDecl((expr as CallExpression).expression);
-                if (decl && shouldPropagateCallRecordReturn(decl as EmittableAsCall)) {
-                    const info = getFunctionInfo(decl as EmittableAsCall);
-                    if (!info.recordReturnAmbiguous)
-                        return objectLiteralRecordClassInfoIsProfitable(info.recordReturnClassInfo) ? info.recordReturnClassInfo : null;
-                }
-            }
-            return null;
-        }
-
-        function availableVarRecordClassInfo(decl: VarOrParam) {
-            const info = getVarInfo(decl);
-            const recordInfo = info.recordClassInfo || null;
-            if (!recordInfo || decl.kind != SK.Parameter)
-                return recordInfo;
-            if (!bin.finalPass)
-                return null;
-            return recordInfoHasFields(recordInfo, info.recordReadFields) ? recordInfo : null;
-        }
-
-        function recordInfoHasFields(recordInfo: ClassInfo, fields: pxt.Map<boolean>) {
-            if (!fields)
-                return true;
-            for (const field of Object.keys(fields)) {
-                if (!tryGetFieldInfo(recordInfo, field))
-                    return false;
-            }
-            return true;
-        }
-
-        function recordFieldNames(info: ClassInfo) {
-            return info && info.allfields ? info.allfields.map(f => getName(f)).filter(name => !!name) : [];
-        }
-
-        function recordFieldsText(info: ClassInfo) {
-            return recordFieldNames(info).join(",");
-        }
-
-        function expressionRecordClassInfoWithSource(expr: Expression) {
-            const info = expressionRecordClassInfo(expr);
-            if (info)
-                return { info, source: "provenance" };
-            const contextualInfo = expressionContextualRecordClassInfo(expr);
-            if (contextualInfo)
-                return { info: contextualInfo, source: "contextualType" };
-            return null;
-        }
-
-        function clearObjectLiteralRecordProvenance() {
-            for (const key of Object.keys(objectLiteralRecordProvenanceVars))
-                delete objectLiteralRecordProvenanceVars[key];
-            for (const key of Object.keys(objectLiteralRecordProvenanceVarUnknown))
-                delete objectLiteralRecordProvenanceVarUnknown[key];
-            for (const key of Object.keys(objectLiteralRecordProvenanceReturns))
-                delete objectLiteralRecordProvenanceReturns[key];
-            for (const key of Object.keys(objectLiteralRecordProvenanceReturnUnknown))
-                delete objectLiteralRecordProvenanceReturnUnknown[key];
-            for (const key of Object.keys(objectLiteralRecordShapeReadCounts))
-                delete objectLiteralRecordShapeReadCounts[key];
-            objectLiteralRecordProvenanceAnalyzed = false;
-        }
-
-        function recordProvenanceExprClassInfo(expr: Expression): ClassInfo {
-            if (!objectLiteralRecordProvenanceAnalyzed || !bin.finalPass)
-                return undefined;
-            if (expr.kind == SK.Identifier) {
-                const decl = getDecl(expr);
-                if (decl && (decl.kind == SK.VariableDeclaration || decl.kind == SK.Parameter || decl.kind == SK.BindingElement)) {
-                    const key = nodeKey(decl);
-                    if (objectLiteralRecordProvenanceVarUnknown[key])
-                        return null;
-                    if (objectLiteralRecordProvenanceVars.hasOwnProperty(key))
-                        return objectLiteralRecordProvenanceVars[key] || null;
-                }
-            } else if (expr.kind == SK.PropertyAccessExpression) {
-                const decl = getDecl(expr);
-                if (decl && decl.kind == SK.PropertyDeclaration) {
-                    const key = nodeKey(decl);
-                    if (objectLiteralRecordProvenanceVarUnknown[key])
-                        return null;
-                    if (objectLiteralRecordProvenanceVars.hasOwnProperty(key))
-                        return objectLiteralRecordProvenanceVars[key] || null;
-                }
-            } else if (expr.kind == SK.CallExpression) {
-                const decl = getDecl((expr as CallExpression).expression);
-                if (decl && decl.kind == SK.FunctionDeclaration) {
-                    const key = nodeKey(decl);
-                    if (objectLiteralRecordProvenanceReturnUnknown[key])
-                        return null;
-                    if (objectLiteralRecordProvenanceReturns.hasOwnProperty(key))
-                        return objectLiteralRecordProvenanceReturns[key] || null;
-                }
-            }
-            return undefined;
-        }
-
-        function analyzeObjectLiteralRecordProvenance() {
-            clearObjectLiteralRecordProvenance();
-            if (!objectLiteralRecords)
-                return;
-
-            const actions = bin.procs
-                .map(p => p.action)
-                .filter(a => !!a && (a.kind == SK.FunctionDeclaration || a.kind == SK.MethodDeclaration || a.kind == SK.Constructor || a.kind == SK.ArrowFunction || a.kind == SK.FunctionExpression));
-
-            let currentVars: pxt.Map<ClassInfo> = {};
-            let currentVarUnknown: pxt.Map<boolean> = {};
-            let currentReturns: pxt.Map<ClassInfo> = {};
-            let currentReturnUnknown: pxt.Map<boolean> = {};
-            let currentShapeReadCounts: pxt.Map<number> = {};
-
-            function clearMap<T>(map: pxt.Map<T>) {
-                for (const key of Object.keys(map))
-                    delete map[key];
-            }
-
-            function mergeRecordFact(key: string, info: ClassInfo, records: pxt.Map<ClassInfo>, unknown: pxt.Map<boolean>) {
-                if (unknown[key])
-                    return;
-                if (!info) {
-                    delete records[key];
-                    unknown[key] = true;
-                    return;
-                }
-                const existing = records[key];
-                if (!existing) {
-                    records[key] = info;
-                } else if (existing != info) {
-                    delete records[key];
-                    unknown[key] = true;
-                }
-            }
-
-            function setRecordFact(key: string, info: ClassInfo, records: pxt.Map<ClassInfo>, unknown: pxt.Map<boolean>) {
-                if (info)
-                    records[key] = info;
-                else
-                    unknown[key] = true;
-            }
-
-            function sameRecordFacts(a: pxt.Map<ClassInfo>, au: pxt.Map<boolean>, b: pxt.Map<ClassInfo>, bu: pxt.Map<boolean>) {
-                const keys: pxt.Map<boolean> = {};
-                for (const key of Object.keys(a)) keys[key] = true;
-                for (const key of Object.keys(au)) keys[key] = true;
-                for (const key of Object.keys(b)) keys[key] = true;
-                for (const key of Object.keys(bu)) keys[key] = true;
-                for (const key of Object.keys(keys)) {
-                    if (!!au[key] != !!bu[key])
-                        return false;
-                    if ((a[key] || null) != (b[key] || null))
-                        return false;
-                }
-                return true;
-            }
-
-            function copyRecordFacts(from: pxt.Map<ClassInfo>, fromUnknown: pxt.Map<boolean>, to: pxt.Map<ClassInfo>, toUnknown: pxt.Map<boolean>) {
-                clearMap(to);
-                clearMap(toUnknown);
-                for (const key of Object.keys(from))
-                    to[key] = from[key];
-                for (const key of Object.keys(fromUnknown))
-                    toUnknown[key] = fromUnknown[key];
-            }
-
-            function analyzeIteration() {
-                const nextVars: pxt.Map<ClassInfo> = {};
-                const nextVarUnknown: pxt.Map<boolean> = {};
-                const nextReturns: pxt.Map<ClassInfo> = {};
-                const nextReturnUnknown: pxt.Map<boolean> = {};
-                const nextShapeReadCounts: pxt.Map<number> = {};
-
-                function noteShapeReadDemand(info: ClassInfo, fieldName: string) {
-                    if (!info || !info.recordShapeKey || !tryGetFieldInfo(info, fieldName))
-                        return;
-                    nextShapeReadCounts[info.recordShapeKey] = (nextShapeReadCounts[info.recordShapeKey] || 0) + 1;
-                }
-
-                function analyzeAction(action: FunctionLikeDeclaration) {
-                    const localVars: pxt.Map<ClassInfo> = {};
-                    const localVarUnknown: pxt.Map<boolean> = {};
-
-                    function localFact(decl: Declaration) {
-                        const key = nodeKey(decl);
-                        if (localVarUnknown[key])
-                            return null;
-                        if (localVars.hasOwnProperty(key))
-                            return localVars[key] || null;
-                        if (currentVarUnknown[key])
-                            return null;
-                        if (currentVars.hasOwnProperty(key))
-                            return currentVars[key] || null;
-                        return null;
-                    }
-
-                    function setLocalFact(decl: Declaration, info: ClassInfo) {
-                        const key = nodeKey(decl);
-                        delete localVars[key];
-                        delete localVarUnknown[key];
-                        setRecordFact(key, info, localVars, localVarUnknown);
-                        setRecordFact(key, info, nextVars, nextVarUnknown);
-                    }
-
-                    function markLocalUnknown(decl: Declaration) {
-                        setLocalFact(decl, null);
-                    }
-
-                    function exprFact(expr: Expression): ClassInfo {
-                        if (!expr)
-                            return null;
-                        switch (expr.kind) {
-                            case SK.ObjectLiteralExpression: {
-                                const candidate = analyzeClosedObjectLiteral(expr as ObjectLiteralExpression, checker.getContextualType(expr));
-                                return candidate.eligible ? getObjectLiteralRecordClassInfo(expr as ObjectLiteralExpression, candidate) : null;
-                            }
-                            case SK.Identifier: {
-                                const decl = getDeclCore(expr);
-                                if (decl && (decl.kind == SK.VariableDeclaration || decl.kind == SK.Parameter || decl.kind == SK.BindingElement))
-                                    return localFact(decl);
-                                return null;
-                            }
-                            case SK.PropertyAccessExpression: {
-                                const decl = getDeclCore(expr);
-                                if (decl && decl.kind == SK.PropertyDeclaration)
-                                    return localFact(decl);
-                                return null;
-                            }
-                            case SK.CallExpression: {
-                                const decl = getDeclCore((expr as CallExpression).expression);
-                                if (decl && shouldPropagateCallRecordReturn(decl as EmittableAsCall)) {
-                                    const key = nodeKey(decl);
-                                    if (currentReturnUnknown[key])
-                                        return null;
-                                    return currentReturns[key] || null;
-                                }
-                                return null;
-                            }
-                            case SK.ParenthesizedExpression:
-                                return exprFact((expr as ParenthesizedExpression).expression);
-                            case SK.AsExpression:
-                            case SK.TypeAssertionExpression:
-                                return exprFact((expr as AssertionExpression).expression);
-                            default:
-                                return null;
-                        }
-                    }
-
-                    function contextualTypeFact(expr: Expression): ClassInfo {
-                        if (!expr)
-                            return null;
-                        const key = objectLiteralRecordTypeKey(typeOf(expr));
-                        const info = key && objectLiteralRecordTypeInfos[key];
-                        return info && !info.ambiguous ? info.recordInfo || null : null;
-                    }
-
-                    function readDemandFact(expr: Expression): ClassInfo {
-                        return exprFact(expr) || contextualTypeFact(expr);
-                    }
-
-                    function invalidateExpression(expr: Expression) {
-                        if (!expr)
-                            return;
-                        if (expr.kind == SK.Identifier) {
-                            const decl = getDeclCore(expr);
-                            if (decl && (decl.kind == SK.VariableDeclaration || decl.kind == SK.Parameter || decl.kind == SK.BindingElement))
-                                markLocalUnknown(decl);
-                        } else if (expr.kind == SK.PropertyAccessExpression) {
-                            const decl = getDeclCore(expr);
-                            if (decl && decl.kind == SK.PropertyDeclaration)
-                                markLocalUnknown(decl);
-                            else
-                                invalidateExpression((expr as PropertyAccessExpression).expression);
-                        } else if (expr.kind == SK.ElementAccessExpression) {
-                            invalidateExpression((expr as ElementAccessExpression).expression);
-                        }
-                    }
-
-                    function walkExpression(expr: Expression) {
-                        if (!expr)
-                            return;
-                        switch (expr.kind) {
-                            case SK.CallExpression: {
-                                const call = expr as CallExpression;
-                                const decl = getDeclCore(call.expression);
-                                if (decl && decl.kind == SK.FunctionDeclaration && shouldPropagateCallParameterRecords(decl as FunctionDeclaration)) {
-                                    const params = (decl as FunctionDeclaration).parameters;
-                                    call.arguments.forEach((arg, i) => {
-                                        if (params[i])
-                                            mergeRecordFact(nodeKey(params[i]), exprFact(arg), nextVars, nextVarUnknown);
-                                        walkExpression(arg);
-                                    });
-                                } else {
-                                    call.arguments.forEach(arg => {
-                                        invalidateExpression(arg);
-                                        walkExpression(arg);
-                                    });
-                                }
-                                return;
-                            }
-                            case SK.BinaryExpression: {
-                                const binExpr = expr as BinaryExpression;
-                                if (binExpr.operatorToken.kind == SK.EqualsToken) {
-                                    if (binExpr.left.kind == SK.Identifier) {
-                                        const decl = getDeclCore(binExpr.left);
-                                        if (decl && (decl.kind == SK.VariableDeclaration || decl.kind == SK.Parameter || decl.kind == SK.BindingElement))
-                                            setLocalFact(decl, exprFact(binExpr.right));
-                                    } else if (binExpr.left.kind == SK.PropertyAccessExpression) {
-                                        const decl = getDeclCore(binExpr.left);
-                                        if (decl && decl.kind == SK.PropertyDeclaration)
-                                            setLocalFact(decl, exprFact(binExpr.right));
-                                        else if (decl && (decl.kind == SK.PropertySignature || decl.kind == SK.PropertyAssignment))
-                                            walkExpression((binExpr.left as PropertyAccessExpression).expression);
-                                        else
-                                            invalidateExpression(binExpr.left);
-                                    } else {
-                                        invalidateExpression(binExpr.left);
-                                    }
-                                    walkExpression(binExpr.right);
-                                } else {
-                                    walkExpression(binExpr.left);
-                                    walkExpression(binExpr.right);
-                                }
-                                return;
-                            }
-                            case SK.ElementAccessExpression: {
-                                const el = expr as ElementAccessExpression;
-                                invalidateExpression(el.expression);
-                                walkExpression(el.expression);
-                                walkExpression(el.argumentExpression);
-                                return;
-                            }
-                            case SK.ArrayLiteralExpression:
-                                (expr as ArrayLiteralExpression).elements.forEach(elt => {
-                                    invalidateExpression(elt);
-                                    walkExpression(elt);
-                                });
-                                return;
-                            case SK.ObjectLiteralExpression:
-                                (expr as ObjectLiteralExpression).properties.forEach(prop => {
-                                    if (prop.kind == SK.PropertyAssignment)
-                                        walkExpression((prop as PropertyAssignment).initializer);
-                                    else if (prop.kind == SK.SpreadAssignment) {
-                                        invalidateExpression((prop as SpreadAssignment).expression);
-                                        walkExpression((prop as SpreadAssignment).expression);
-                                    }
-                                });
-                                return;
-                            case SK.PropertyAccessExpression:
-                                {
-                                    const access = expr as PropertyAccessExpression;
-                                    const decl = getDeclCore(access);
-                                    if (decl && (decl.kind == SK.PropertySignature || decl.kind == SK.PropertyAssignment))
-                                        noteShapeReadDemand(readDemandFact(access.expression), access.name.text);
-                                }
-                                walkExpression((expr as PropertyAccessExpression).expression);
-                                return;
-                            case SK.ParenthesizedExpression:
-                                walkExpression((expr as ParenthesizedExpression).expression);
-                                return;
-                            case SK.AsExpression:
-                            case SK.TypeAssertionExpression:
-                                walkExpression((expr as AssertionExpression).expression);
-                                return;
-                            case SK.ArrowFunction:
-                            case SK.FunctionExpression:
-                                return;
-                            default:
-                                ts.forEachChild(expr, child => {
-                                    if ((child as Node).kind)
-                                        walkNode(child as Node);
-                                });
-                        }
-                    }
-
-                    function walkNode(node: Node) {
-                        if (!node)
-                            return;
-                        switch (node.kind) {
-                            case SK.VariableDeclaration: {
-                                const decl = node as VariableDeclaration;
-                                setLocalFact(decl, decl.initializer ? exprFact(decl.initializer) : null);
-                                walkExpression(decl.initializer);
-                                return;
-                            }
-                            case SK.PropertyDeclaration: {
-                                const decl = node as PropertyDeclaration;
-                                if (decl.initializer) {
-                                    setLocalFact(decl, exprFact(decl.initializer));
-                                    walkExpression(decl.initializer);
-                                }
-                                return;
-                            }
-                            case SK.ReturnStatement: {
-                                const ret = node as ReturnStatement;
-                                mergeRecordFact(nodeKey(action), ret.expression ? exprFact(ret.expression) : null, nextReturns, nextReturnUnknown);
-                                walkExpression(ret.expression);
-                                return;
-                            }
-                            case SK.ExpressionStatement:
-                                walkExpression((node as ExpressionStatement).expression);
-                                return;
-                            case SK.ArrowFunction:
-                            case SK.FunctionExpression:
-                                return;
-                            default:
-                                ts.forEachChild(node, child => walkNode(child as Node));
-                        }
-                    }
-
-                    getParameters(action).forEach(param => {
-                        const key = nodeKey(param);
-                        if (currentVarUnknown[key])
-                            markLocalUnknown(param);
-                        else if (currentVars.hasOwnProperty(key))
-                            setLocalFact(param, currentVars[key]);
-                    });
-
-                    getFunctionInfo(action).capturedVars.forEach(markLocalUnknown);
-
-                    if (action.body) {
-                        if (action.body.kind == SK.Block)
-                            walkNode(action.body);
-                        else
-                            mergeRecordFact(nodeKey(action), exprFact(action.body as Expression), nextReturns, nextReturnUnknown);
-                    }
-                }
-
-                actions.forEach(analyzeAction);
-
-                const changed =
-                    !sameRecordFacts(currentVars, currentVarUnknown, nextVars, nextVarUnknown) ||
-                    !sameRecordFacts(currentReturns, currentReturnUnknown, nextReturns, nextReturnUnknown);
-                currentVars = nextVars;
-                currentVarUnknown = nextVarUnknown;
-                currentReturns = nextReturns;
-                currentReturnUnknown = nextReturnUnknown;
-                currentShapeReadCounts = nextShapeReadCounts;
-                return changed;
-            }
-
-            for (let i = 0; i < 8; ++i) {
-                if (!analyzeIteration())
-                    break;
-            }
-
-            copyRecordFacts(currentVars, currentVarUnknown, objectLiteralRecordProvenanceVars, objectLiteralRecordProvenanceVarUnknown);
-            copyRecordFacts(currentReturns, currentReturnUnknown, objectLiteralRecordProvenanceReturns, objectLiteralRecordProvenanceReturnUnknown);
-            for (const key of Object.keys(currentShapeReadCounts))
-                objectLiteralRecordShapeReadCounts[key] = currentShapeReadCounts[key];
-            objectLiteralRecordProvenanceAnalyzed = true;
-        }
-
-        function noteFunctionRecordReturn(expr: Expression) {
-            if (!objectLiteralRecords || !proc || !proc.action)
-                return;
-            const info = getFunctionInfo(proc.action as FunctionLikeDeclaration);
-            const recordInfo = expressionRecordClassInfo(expr);
-            if (!recordInfo) {
-                info.recordReturnAmbiguous = true;
-                info.recordReturnClassInfo = null;
-            } else if (!info.recordReturnClassInfo) {
-                info.recordReturnClassInfo = recordInfo;
-            } else if (info.recordReturnClassInfo != recordInfo) {
-                info.recordReturnAmbiguous = true;
-                info.recordReturnClassInfo = null;
-            }
-        }
-
-        function noteParameterRecordInfo(param: ParameterDeclaration, recordInfo: ClassInfo) {
-            if (!objectLiteralRecords || !param)
-                return;
-            const info = getVarInfo(param);
-            if (info.recordClassInfoAmbiguous)
-                return;
-            if (!recordInfo) {
-                if (info.recordClassInfo) {
-                    info.recordClassInfo = null;
-                    info.recordClassInfoAmbiguous = true;
-                }
-            } else if (!info.recordClassInfo) {
-                info.recordClassInfo = recordInfo;
-            } else if (info.recordClassInfo != recordInfo) {
-                info.recordClassInfo = null;
-                info.recordClassInfoAmbiguous = true;
-            }
-        }
-
-        function emitCallArgument(expr: Expression, param: ParameterDeclaration) {
-            const emitted = emitExpr(expr);
-            const recordInfo = expressionRecordClassInfo(expr);
-            if (param)
-                noteParameterRecordInfo(param, recordInfo);
-            markExpressionRecordInterfaceFieldsNeeded(expr, "callArgument");
-            return emitted;
-        }
-
-        function shouldPropagateCallParameterRecords(decl: EmittableAsCall) {
-            if (!objectLiteralRecords || !decl || decl.kind != SK.FunctionDeclaration)
-                return false;
-            const info = getFunctionInfo(decl as FunctionDeclaration);
-            return !info.usedAsValue;
-        }
-
-        function shouldPropagateCallRecordReturn(decl: EmittableAsCall) {
-            if (!objectLiteralRecords || !decl)
-                return false;
-            if (decl.kind == SK.FunctionDeclaration)
-                return shouldPropagateCallParameterRecords(decl);
-            if (decl.kind == SK.MethodDeclaration) {
-                const info = getFunctionInfo(decl as MethodDeclaration);
-                return !info.usedAsValue && !info.virtualParent;
-            }
-            return false;
-        }
-
-        function noteParameterRecordFieldRead(expr: Expression, fieldName: string) {
-            if (!objectLiteralRecords || !expr || expr.kind != SK.Identifier)
-                return;
-            const decl = getDecl(expr);
-            if (!decl || decl.kind != SK.Parameter)
-                return;
-            const info = getVarInfo(decl as ParameterDeclaration);
-            if (!info.recordReadFields)
-                info.recordReadFields = {};
-            info.recordReadFields[fieldName] = true;
+            return emitExpr(expr);
         }
 
         function reset() {
@@ -2210,13 +1400,9 @@ namespace ts.pxtc {
 
         for (; ;) {
             flushWorkQueue()
-            markProfitableObjectLiteralRecordClasses()
             if (fixpointVTables())
                 break
         }
-
-        analyzeObjectLiteralRecordProvenance();
-        markProfitableObjectLiteralRecordClasses()
 
         layOutGlobals()
         needsUsingInfo = false
@@ -2593,18 +1779,16 @@ namespace ts.pxtc {
 
             const fieldNames: pxt.Map<boolean> = {}
 
-            if (!inf.recordShapeKey || inf.recordNeedsInterfaceFields) {
-                for (let fld of inf.allfields) {
-                    let fname = getName(fld)
-                    let finfo = fieldIndexCore(inf, fld, false)
-                    fieldNames[fname] = true
-                    inf.itable.push({
-                        name: fname,
-                        info: (finfo.idx + 1) * (isStackMachine() ? 1 : 4),
-                        idx: getIfaceMemberId(fname),
-                        proc: null
-                    })
-                }
+            for (let fld of inf.allfields) {
+                let fname = getName(fld)
+                let finfo = fieldIndexCore(inf, fld, false)
+                fieldNames[fname] = true
+                inf.itable.push({
+                    name: fname,
+                    info: (finfo.idx + 1) * (isStackMachine() ? 1 : 4),
+                    idx: getIfaceMemberId(fname),
+                    proc: null
+                })
             }
 
             for (let curr = inf; curr; curr = curr.baseClassInfo) {
@@ -2973,45 +2157,7 @@ ${lbl}: .short 0xffff
                 proc.emitExpr(ir.rtcall("langsupp::ignore", [coll], 1))
             return coll
         }
-        function emitObjectLiteralRecord(node: ObjectLiteralExpression, candidate: ObjectLiteralRecordCandidate) {
-            const info = getObjectLiteralRecordClassInfo(node, candidate);
-            markVTableUsed(info);
-
-            const lbl = info.id + "_VT";
-            const expr = ir.shared(ir.rtcall("pxt::mkClassInstance", [ir.ptrlit(lbl, lbl)]));
-
-            for (const field of candidate.fields) {
-                const prop = candidate.fieldDecls[field] as PropertyAssignment | ShorthandPropertyAssignment;
-                let init: ir.Expr;
-                if (prop.kind == SK.ShorthandPropertyAssignment) {
-                    const vsym = checker.getShorthandAssignmentValueSymbol(prop);
-                    const vname: Identifier = vsym && vsym.valueDeclaration && (vsym.valueDeclaration as any).name;
-                    if (vname && vname.kind == SK.Identifier)
-                        init = emitIdentifier(vname);
-                    else
-                        throw unhandled(prop);
-                } else {
-                    init = emitExpr(prop.initializer);
-                }
-
-                const targetExpr = ir.op(EK.FieldAccess, [expr], fieldIndexCore(info, getFieldInfo(info, field), false));
-                proc.emitExpr(ir.op(EK.Store, [targetExpr, init]));
-            }
-
-            return expr;
-        }
         function emitObjectLiteral(node: ObjectLiteralExpression) {
-            const contextualType = checker.getContextualType(node);
-            const recordCandidate = analyzeClosedObjectLiteral(node, contextualType);
-            if (objectLiteralRecords && recordCandidate.eligible && !bin.finalPass) {
-                objectLiteralRecordShapeCounts[recordCandidate.shapeKey] = (objectLiteralRecordShapeCounts[recordCandidate.shapeKey] || 0) + 1;
-                noteObjectLiteralRecordTypeInfo(contextualType, getObjectLiteralRecordClassInfo(node, recordCandidate));
-            } else if (objectLiteralRecords && !recordCandidate.eligible && !bin.finalPass) {
-                noteObjectLiteralRecordTypeInfo(contextualType, null);
-            }
-            if (objectLiteralRecords && recordCandidate.eligible && objectLiteralRecordShapeIsProfitable(recordCandidate.shapeKey)) {
-                return emitObjectLiteralRecord(node, recordCandidate);
-            }
             let expr = ir.shared(ir.rtcall("pxtrt::mkMap", []))
             node.properties.forEach((p: PropertyAssignment | ShorthandPropertyAssignment) => {
                 assert(!p.questionToken) // should be disallowed by TS grammar checker
@@ -3094,22 +2240,6 @@ ${lbl}: .short 0xffff
             if (decl.kind == SK.EnumMember) {
                 throw userError(9210, lf("Cannot compute enum value"))
             } else if (decl.kind == SK.PropertySignature || decl.kind == SK.PropertyAssignment) {
-                noteParameterRecordFieldRead(node.expression, node.name.text);
-                let recordInfo = expressionRecordClassInfo(node.expression);
-                let recordSource = "provenance";
-                if (!recordInfo) {
-                    recordInfo = expressionContextualRecordClassInfo(node.expression);
-                    recordSource = "contextualType";
-                }
-                if (recordInfo) {
-                    const recordField = tryGetFieldInfo(recordInfo, node.name.text);
-                    if (recordField) {
-
-                        return ir.op(EK.FieldAccess, [emitExpr(node.expression)], fieldIndexCore(recordInfo, recordField, false));
-                    }
-
-                }
-
                 return emitCallCore(node, node, [], null, decl as any, node.expression)
             } else if (decl.kind == SK.PropertyDeclaration || decl.kind == SK.Parameter) {
                 if (isStatic(decl)) {
@@ -3558,10 +2688,7 @@ ${lbl}: .short 0xffff
             }
 
             function emitPlain() {
-                const params: NodeArray<ParameterDeclaration> = shouldPropagateCallParameterRecords(decl)
-                    ? (decl as FunctionDeclaration).parameters
-                    : undefined;
-                let r = mkProcCall(decl, node, args.map((x, i) => params ? emitCallArgument(x, params[i]) : emitEscapedExpression(x, "callArgument")))
+                let r = mkProcCall(decl, node, args.map(x => emitEscapedExpression(x, "callArgument")))
                 let pp = r.data as ir.ProcId
                 if (args[0] && pp.proc && pp.proc.classInfo)
                     pp.isThis = args[0].kind == SK.ThisKeyword
@@ -4587,17 +3714,7 @@ ${lbl}: .short 0xffff
                     }
                     proc.emitExpr(emitCallCore(trg, trg, [src], null, decl as FunctionLikeDeclaration))
                 } else if (decl && (decl.kind == SK.PropertySignature || decl.kind == SK.PropertyAssignment)) {
-                    const receiver = (trg as PropertyAccessExpression).expression;
-                    const recordInfo = expressionRecordClassInfo(receiver);
-                    const fieldName = (trg as PropertyAccessExpression).name.text;
-                    const recordField = recordInfo ? tryGetFieldInfo(recordInfo, fieldName) : null;
-                    if (recordField) {
-
-                        const targetExpr = ir.op(EK.FieldAccess, [emitExpr(receiver)], fieldIndexCore(recordInfo, recordField, false));
-                        proc.emitExpr(ir.op(EK.Store, [targetExpr, emitEscapedExpression(src, "assignment")]));
-                    } else {
-                        proc.emitExpr(emitCallCore(trg, trg, [src], null, decl as FunctionLikeDeclaration))
-                    }
+                    proc.emitExpr(emitCallCore(trg, trg, [src], null, decl as FunctionLikeDeclaration))
                 } else if (decl && isSlowField(decl)) {
                     proc.emitExpr(emitCallCore(trg, trg, [src], null, decl as FunctionLikeDeclaration))
                 } else {
@@ -5669,11 +4786,8 @@ ${lbl}: .short 0xffff
             let v: ir.Expr = null
             if (node.expression) {
                 v = emitExpr(node.expression)
-                noteFunctionRecordReturn(node.expression)
-                markExpressionRecordInterfaceFieldsNeeded(node.expression, "return")
             } else if (funcHasReturn(proc.action)) {
                 v = emitLit(undefined) // == return undefined
-                noteFunctionRecordReturn(null)
             }
             let numTry = 0
             for (let p: Node = node; p; p = p.parent) {
@@ -5915,9 +5029,7 @@ ${lbl}: .short 0xffff
                 const initializerExpr = isGlobalVar(node)
                     ? emitEscapedExpression(node.initializer, "initializer")
                     : emitExpr(node.initializer);
-                const initializerRecordInfo = expressionRecordClassInfo(node.initializer);
                 proc.emitExpr(loc.storeByRef(initializerExpr))
-                getVarInfo(node).recordClassInfo = initializerRecordInfo;
                 currJres = null
                 proc.stackEmpty();
             } else if (inLoop(node)) {

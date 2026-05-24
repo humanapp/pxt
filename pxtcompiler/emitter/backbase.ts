@@ -1838,7 +1838,7 @@ ${baseLabel}_nochk:
 
             this.write(`push {lr}`)
 
-            const expandHelper = this.emitLabelledHelper(`expand_args_${numargs}`, () => {
+            this.emitLabelledHelper(`expand_args_${numargs}`, () => {
                 this.write(`movs r0, #0`)
                 this.write(`movs r1, #0`)
                 if (needsAlign)

@@ -1043,6 +1043,7 @@ namespace ts.pxtc {
         const objectLiteralRecordShapeCounts: pxt.Map<number> = {};
         const objectLiteralRecordShapeReadCounts: pxt.Map<number> = {};
         const objectLiteralRecordTypeInfos: pxt.Map<ObjectLiteralRecordTypeInfo> = {};
+        const objectLiteralRecordV2AttributionCounts: pxt.Map<number> = {};
         let objectLiteralRecordClassNo = 0;
         const objectLiteralRecordShapeThreshold = 3;
         const objectLiteralRecordShapeReadThreshold = 8;
@@ -1594,6 +1595,76 @@ namespace ts.pxtc {
                     `shapeReadCount=${count}`
                 ].join(" | "));
             }
+        }
+
+        function contextualOptionalOmissions(node: ObjectLiteralExpression, contextualType: Type) {
+            if (!contextualType || !isInterfaceType(contextualType))
+                return [] as string[];
+
+            const present: pxt.Map<boolean> = {};
+            for (const prop of node.properties) {
+                const name = objectLiteralPropertyName(prop);
+                if (name)
+                    present[name] = true;
+            }
+
+            return checker.getPropertiesOfType(contextualType)
+                .filter(prop => !!(prop.flags & SymbolFlags.Optional) && !present[prop.name])
+                .map(prop => prop.name);
+        }
+
+        function structuralUnionArmCount(contextualType: Type) {
+            if (!contextualType || !(contextualType.flags & TypeFlags.Union))
+                return 0;
+            const union = contextualType as UnionType;
+            return (union.types || []).filter(objectLiteralUnionRecordContextArm).length;
+        }
+
+        function objectLiteralImmediateUse(node: ObjectLiteralExpression) {
+            const parent = node.parent;
+            if (!parent)
+                return "unknown";
+            switch (parent.kind) {
+                case SK.VariableDeclaration:
+                    return "localInitializer";
+                case SK.ReturnStatement:
+                    return "return";
+                case SK.CallExpression:
+                    return "callArgument";
+                case SK.ArrayLiteralExpression:
+                    return "arrayElement";
+                case SK.PropertyAssignment:
+                    return "objectProperty";
+                case SK.BinaryExpression:
+                    return (parent as BinaryExpression).right == node ? "assignmentRight" : "binaryExpression";
+                case SK.ExpressionStatement:
+                    return "expressionStatement";
+                default:
+                    return kindName(parent.kind);
+            }
+        }
+
+        function incrementObjectLiteralRecordV2Attribution(details: string[]) {
+            if (!bin.finalPass)
+                return;
+            const key = details.join("\t");
+            objectLiteralRecordV2AttributionCounts[key] = (objectLiteralRecordV2AttributionCounts[key] || 0) + 1;
+        }
+
+        function traceObjectLiteralRecordV2AttributionSummary() {
+            if (!loweringTrace)
+                return;
+            Object.keys(objectLiteralRecordV2AttributionCounts)
+                .sort((a, b) => objectLiteralRecordV2AttributionCounts[b] - objectLiteralRecordV2AttributionCounts[a] || U.strcmp(a, b))
+                .forEach(key => {
+                    loweringTrace.push([
+                        "objectLiteralRecordV2.summary",
+                        "<analysis>",
+                        "text=",
+                        `count=${objectLiteralRecordV2AttributionCounts[key]}`,
+                        key.split("\t").join(" | ")
+                    ].join(" | "));
+                });
         }
 
         function ifaceCallKindCounts(ifaceIndex: number, getset: string) {
@@ -2407,6 +2478,7 @@ namespace ts.pxtc {
         bin.dynamicIfaceCalls = {}
         emit(rootFunction)
         markExactIfaceWrappers()
+        traceObjectLiteralRecordV2AttributionSummary()
 
         U.assert(usedWorkList.length == 0)
 
@@ -3179,6 +3251,16 @@ ${lbl}: .short 0xffff
             const recordCandidate = analyzeClosedObjectLiteral(node, contextualType);
             const objectLiteralProperties = node.properties.map(p => objectLiteralPropertyName(p) || "");
             const computedPropertyCount = node.properties.filter(p => p.kind != SK.SpreadAssignment && (p as PropertyAssignment | ShorthandPropertyAssignment).name && (p as PropertyAssignment | ShorthandPropertyAssignment).name.kind == SK.ComputedPropertyName).length;
+            const spreadPropertyCount = node.properties.filter(p => p.kind == SK.SpreadAssignment).length;
+            const optionalOmissions = contextualOptionalOmissions(node, contextualType);
+            const immediateUse = objectLiteralImmediateUse(node);
+            const structuralUnionArms = structuralUnionArmCount(contextualType);
+            const v2Bucket = !recordCandidate.eligible ? "notEligible" :
+                optionalOmissions.length ? "optionalOmissions" :
+                    spreadPropertyCount ? "spread" :
+                        computedPropertyCount ? "computed" :
+                            (immediateUse == "arrayElement" || immediateUse == "objectProperty") ? "storedInAggregate" :
+                                "narrowCandidate";
             traceLowering("emitObjectLiteral.map", node, [
                 `type=${typeText(typeOf(node))}`,
                 `contextualType=${typeText(contextualType)}`,
@@ -3191,6 +3273,24 @@ ${lbl}: .short 0xffff
                 `contextualType=${typeText(contextualType)}`,
                 `fields=${recordCandidate.fields.join(",")}`
             ]);
+            const recordV2Details = [
+                recordCandidate.eligible ? "acceptedRecordCandidate" : "rejectedRecordCandidate",
+                `v2Bucket=${v2Bucket}`,
+                `reason=${recordCandidate.reason}`,
+                `contextualType=${typeText(contextualType)}`,
+                `fields=${recordCandidate.fields.join(",")}`,
+                `properties=${objectLiteralProperties.join(",")}`,
+                `propertyCount=${node.properties.length}`,
+                `computedPropertyCount=${computedPropertyCount}`,
+                `spreadPropertyCount=${spreadPropertyCount}`,
+                `optionalOmissionCount=${optionalOmissions.length}`,
+                `optionalOmissions=${optionalOmissions.join(",")}`,
+                `immediateUse=${immediateUse}`,
+                `structuralUnionArms=${structuralUnionArms}`,
+                `native=${!!target.isNative}`
+            ];
+            traceLowering("objectLiteralRecordV2.candidate", node, recordV2Details);
+            incrementObjectLiteralRecordV2Attribution(recordV2Details);
             if (objectLiteralRecords && recordCandidate.eligible && !bin.finalPass) {
                 objectLiteralRecordShapeCounts[recordCandidate.shapeKey] = (objectLiteralRecordShapeCounts[recordCandidate.shapeKey] || 0) + 1;
                 noteObjectLiteralRecordTypeInfo(contextualType, getObjectLiteralRecordClassInfo(node, recordCandidate));

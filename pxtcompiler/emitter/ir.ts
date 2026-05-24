@@ -532,6 +532,7 @@ namespace ts.pxtc.ir {
         classInfo: ClassInfo = null;
         perfCounterName: string = null;
         perfCounterNo = 0;
+        useExactIfaceWrapper = false;
 
         body: Stmt[] = [];
         lblNo = 0;
@@ -555,6 +556,10 @@ namespace ts.pxtc.ir {
 
         vtLabel() {
             return this.label() + (isStackMachine() ? "" : "_args")
+        }
+
+        ifaceVtLabel() {
+            return this.useExactIfaceWrapper ? this.label() + "_iface" : this.vtLabel()
         }
 
         label() {

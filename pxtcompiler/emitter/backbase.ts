@@ -596,6 +596,11 @@ ${baseLabel}_nochk:
 
         private emitFieldAccess(e: ir.Expr, store = false) {
             let info = e.data as FieldAccessInfo
+            if (!store && this.shouldSpecializeCheckedFieldLoad(info)) {
+                this.emitCheckedFieldLoad(info)
+                return
+            }
+
             let pref = store ? "st" : "ld"
             let lbl = pref + "fld_" + info.classInfo.id + "_" + info.name
             if (info.needsCheck && !target.switches.skipClassCheck) {
@@ -614,6 +619,35 @@ ${baseLabel}_nochk:
             else
                 this.write(`ldr r0, [r0, ${xoff}]`)
             return
+        }
+
+        private checkedFieldAccessCountKey(info: FieldAccessInfo) {
+            return `${info.classInfo.id}:${info.name}:get`
+        }
+
+        private shouldSpecializeCheckedFieldLoad(info: FieldAccessInfo) {
+            if (!isThumb() || !this.bin.finalPass || target.switches.skipClassCheck || !info.needsCheck)
+                return false
+            return (this.bin.checkedFieldAccessCounts[this.checkedFieldAccessCountKey(info)] || 0) >= 5
+        }
+
+        private emitCheckedFieldLoad(info: FieldAccessInfo) {
+            const count = this.bin.checkedFieldAccessCounts[this.checkedFieldAccessCountKey(info)] || 0
+            const helperKey = "ldfldchk_" + info.classInfo.id + "_" + info.name
+            const helper = this.ensureLabelledHelper(helperKey, () => {
+                this.write(this.t.helper_prologue())
+                this.emitInstanceOf(info.classInfo, "validate")
+                let off = info.idx * 4 + 4
+                let xoff = "#" + off
+                if (off > 124) {
+                    this.write(this.t.emit_int(off, "r3"))
+                    xoff = "r3"
+                }
+                this.write(`ldr r0, [r0, ${xoff}]`)
+                this.write(this.t.helper_epilogue())
+            })
+            this.traceLowering(`emitCheckedFieldLoad | class=${info.classInfo.id} | field=${info.name} | helper=${helper} | count=${count}`)
+            this.write(this.t.call_lbl(helper, false, this.stackAlignmentNeeded(0)))
         }
 
         private writeFailBranch() {

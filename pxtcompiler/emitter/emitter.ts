@@ -2403,6 +2403,7 @@ namespace ts.pxtc {
         bin.finalPass = true
         bin.ifaceCallCounts = {}
         bin.mapSetByFieldIdCounts = {}
+        bin.checkedFieldAccessCounts = {}
         bin.dynamicIfaceCalls = {}
         emit(rootFunction)
         markExactIfaceWrappers()
@@ -3360,6 +3361,7 @@ ${lbl}: .short 0xffff
                         return emitShim(fld, decl, [node.expression])
                     } else {
                         if (idx.needsCheck && !target.switches.skipClassCheck) {
+                            bin.checkedFieldAccessCounts[checkedFieldAccessCountKey(idx)] = (bin.checkedFieldAccessCounts[checkedFieldAccessCountKey(idx)] || 0) + 1;
                             traceValidationCheck("fieldAccess", node, [
                                 `declKind=${kindName(decl.kind)}`,
                                 `declName=${declName(decl)}`,
@@ -4847,6 +4849,10 @@ ${lbl}: .short 0xffff
                 needsCheck,
                 checkElisionReason
             }
+        }
+
+        function checkedFieldAccessCountKey(info: FieldAccessInfo) {
+            return `${info.classInfo.id}:${info.name}:get`;
         }
 
         function fieldIndex(pacc: PropertyAccessExpression): FieldAccessInfo {
@@ -6764,6 +6770,7 @@ ${lbl}: .short 0xffff
         ifaceMembers: string[];
         ifaceCallCounts: pxt.Map<number> = {};
         mapSetByFieldIdCounts: pxt.Map<number> = {};
+        checkedFieldAccessCounts: pxt.Map<number> = {};
         dynamicIfaceCalls: pxt.Map<boolean> = {};
         strings: pxt.Map<string> = {};
         hexlits: pxt.Map<string> = {};

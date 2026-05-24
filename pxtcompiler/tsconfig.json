@@ -4,7 +4,6 @@
         "noImplicitAny": true,
         "noImplicitReturns": true,
         "noImplicitThis": true,
-        "strictNullChecks": false,
         "declaration": true,
         "outFile": "../built/pxtcompiler.js",
         "newLine": "LF",

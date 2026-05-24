@@ -185,16 +185,10 @@ ${hexLiteralAsm(data)}
         }
 
         public emitHelpers() {
-            this.traceLowering("emitHelpers")
             this.emitLambdaTrampoline()
             this.emitUsedArrayMethods()
             this.emitUsedFieldMethods()
             this.emitBindHelper()
-        }
-
-        private traceLowering(s: string) {
-            if (this.bin.loweringTrace)
-                this.bin.loweringTrace.push("backend." + s)
         }
 
         private markThumbHelper(name: string) {
@@ -632,7 +626,6 @@ ${baseLabel}_nochk:
         }
 
         private emitCheckedFieldLoad(info: FieldAccessInfo) {
-            const count = this.bin.checkedFieldAccessCounts[this.checkedFieldAccessCountKey(info)] || 0
             const helperKey = "ldfldchk_" + info.classInfo.id + "_" + info.name
             const helper = this.ensureLabelledHelper(helperKey, () => {
                 this.write(this.t.helper_prologue())
@@ -646,7 +639,6 @@ ${baseLabel}_nochk:
                 this.write(`ldr r0, [r0, ${xoff}]`)
                 this.write(this.t.helper_epilogue())
             })
-            this.traceLowering(`emitCheckedFieldLoad | class=${info.classInfo.id} | field=${info.name} | helper=${helper} | count=${count}`)
             this.write(this.t.call_lbl(helper, false, this.stackAlignmentNeeded(0)))
         }
 
@@ -899,23 +891,18 @@ ${baseLabel}_nochk:
                 this.loadVTable()
                 this.ifaceCallCore(numargs, getset)
             })
-            const countKey = this.ifaceCallCountKey(procid.ifaceIndex, numargs, getset)
 
-            let emittedHelper = helper
-            let specialized = false
             if (this.shouldSpecializeIfaceCall(procid.ifaceIndex, numargs, getset)) {
                 const thunkKey = helperKey + "_i" + procid.ifaceIndex
-                emittedHelper = this.emitLabelledHelper(thunkKey, () => {
+                this.emitLabelledHelper(thunkKey, () => {
                     this.write(this.t.emit_int(procid.ifaceIndex, "r1"))
                     this.write(`ldlit r7, ${helper}@fn`)
                     this.write(`bx r7`)
                 })
-                specialized = true
             } else {
                 this.write(this.t.emit_int(procid.ifaceIndex, "r1"))
                 this.write(this.t.call_lbl(helper))
             }
-            this.traceLowering(`emitIfaceCall | ifaceIndex=${procid.ifaceIndex} | numargs=${numargs} | getset=${getset || "call"} | helperKey=${helperKey} | helper=${emittedHelper} | specialized=${specialized} | count=${this.bin.ifaceCallCounts[countKey] || 0}`)
         }
 
         private ifaceCallCountKey(ifaceIndex: number, numargs: number, getset: string) {
@@ -1188,7 +1175,6 @@ ${baseLabel}_nochk:
         }
 
         private emitMapSetByFieldIdCall(fieldId: number) {
-            const count = this.bin.mapSetByFieldIdCounts[fieldId + ""] || 0
             const helper = this.ensureLabelledHelper("mapset_i" + fieldId, () => {
                 this.write(this.t.helper_prologue())
                 this.write(this.t.emit_int(fieldId, "r1"))
@@ -1196,7 +1182,6 @@ ${baseLabel}_nochk:
                 this.write(this.t.callCPP("pxtrt::mapSet"))
                 this.write(this.t.helper_epilogue())
             })
-            this.traceLowering(`emitMapSetByFieldId | fieldId=${fieldId} | helper=${helper} | specialized=true | count=${count}`)
             this.write(this.t.call_lbl(helper, false, this.stackAlignmentNeeded(0)))
         }
 
@@ -1274,7 +1259,6 @@ ${baseLabel}_nochk:
         }
 
         private emitFieldMethod(op: string) {
-            this.traceLowering(`emitFieldMethod | op=${op}`)
             this.write(`
                 ${this.helperObject(op)}
                 .section code
@@ -1327,7 +1311,6 @@ ${baseLabel}_nochk:
         }
 
         private emitStringMapSetMethod() {
-            this.traceLowering("emitStringMapSetMethod")
             this.write(`
                 ${this.helperObject("set string map")}
                 .section code
@@ -1836,7 +1819,6 @@ ${baseLabel}_nochk:
             if (this.proc.useExactIfaceWrapper) {
                 this.write(`${this.proc.label()}_iface:`)
                 this.write(`b ${this.proc.label()}_nochk`)
-                this.traceLowering(`emitExactIfaceWrapper | proc=${this.proc.getFullName()} | label=${this.proc.label()} | numargs=${this.proc.args.length} | usedAsValue=${!!this.proc.info.usedAsValue} | usedAsIface=${!!this.proc.info.usedAsIface} | captured=${this.proc.captured.length} | args=${this.proc.args.length} | isMain=${isMain}`)
                 if (!this.proc.info.usedAsValue)
                     return
             }
@@ -1873,8 +1855,6 @@ ${baseLabel}_nochk:
                 }
                 this.write(`bx lr`)
             })
-            this.traceLowering(`emitExpandArgsWrapper | proc=${this.proc.getFullName()} | label=${this.proc.label()} | helper=${expandHelper} | numargs=${numargs} | needsAlign=${needsAlign} | usedAsValue=${!!this.proc.info.usedAsValue} | usedAsIface=${!!this.proc.info.usedAsIface} | captured=${this.proc.captured.length} | args=${this.proc.args.length} | isMain=${isMain}`)
-
             this.write(`bl ${this.proc.label()}_nochk`)
 
             let stackSize = numargs + (needsAlign ? 1 : 0)

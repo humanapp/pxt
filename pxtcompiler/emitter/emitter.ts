@@ -1037,13 +1037,11 @@ namespace ts.pxtc {
 
         let bin = new Binary()
         let proc: ir.Procedure;
-        const loweringTrace = (opts.target.switches as any).loweringTrace ? [] as string[] : undefined;
         const objectLiteralRecords = false;
         const objectLiteralRecordClassInfos: pxt.Map<ClassInfo> = {};
         const objectLiteralRecordShapeCounts: pxt.Map<number> = {};
         const objectLiteralRecordShapeReadCounts: pxt.Map<number> = {};
         const objectLiteralRecordTypeInfos: pxt.Map<ObjectLiteralRecordTypeInfo> = {};
-        const objectLiteralRecordV2AttributionCounts: pxt.Map<number> = {};
         let objectLiteralRecordClassNo = 0;
         const objectLiteralRecordShapeThreshold = 3;
         const objectLiteralRecordShapeReadThreshold = 8;
@@ -1055,92 +1053,12 @@ namespace ts.pxtc {
         const concreteClassFieldInfos: pxt.Map<ClassInfo> = {};
         const concreteClassFieldUnknown: pxt.Map<boolean> = {};
         bin.trace = opts.trace;
-        bin.loweringTrace = loweringTrace;
         bin.breakpoints = opts.breakpoints;
         bin.name = opts.name;
         bin.target = opts.target;
 
-        function traceLowering(label: string, node?: Node, details?: string[]) {
-            if (!loweringTrace || !bin.finalPass)
-                return;
-
-            const parts = [label];
-            if (node) {
-                const loc = nodeLocationInfo(node);
-                parts.push(`${loc.fileName}:${loc.line + 1}:${loc.column + 1}`);
-                parts.push(`text=${shortNodeText(node)}`);
-            }
-            if (details) {
-                for (const detail of details) {
-                    if (detail)
-                        parts.push(detail);
-                }
-            }
-            loweringTrace.push(parts.join(" | "));
-        }
-
-        function shortNodeText(node: Node) {
-            let text = "";
-            try {
-                text = node.getText();
-            } catch { }
-            text = text.replace(/\s+/g, " ");
-            return text.length > 120 ? text.slice(0, 117) + "..." : text;
-        }
-
         function kindName(kind: SyntaxKind) {
             return (SyntaxKind as any)[kind] || kind + "";
-        }
-
-        function receiverShape(expr: Expression): string {
-            if (!expr)
-                return "";
-            switch (expr.kind) {
-                case SK.ParenthesizedExpression:
-                    return receiverShape((expr as ParenthesizedExpression).expression);
-                case SK.AsExpression:
-                case SK.TypeAssertionExpression:
-                    return receiverShape((expr as AssertionExpression).expression);
-                case SK.ElementAccessExpression: {
-                    const indexed = expr as ElementAccessExpression;
-                    const base = indexed.expression;
-                    if (base.kind == SK.ElementAccessExpression)
-                        return "nestedElementAccess";
-                    if (base.kind == SK.PropertyAccessExpression)
-                        return "fieldElementAccess";
-                    return "elementAccess";
-                }
-                case SK.PropertyAccessExpression: {
-                    const access = expr as PropertyAccessExpression;
-                    if (access.expression.kind == SK.ThisKeyword)
-                        return "objectField";
-                    return "propertyChain";
-                }
-                case SK.CallExpression:
-                    return "directCallReturn";
-                case SK.Identifier: {
-                    const decl = getDeclCore(expr);
-                    if (decl && decl.kind == SK.Parameter)
-                        return "parameter";
-                    if (decl && (decl.kind == SK.VariableDeclaration || decl.kind == SK.BindingElement))
-                        return "local";
-                    return "identifier";
-                }
-                case SK.ThisKeyword:
-                    return "this";
-                default:
-                    return kindName(expr.kind);
-            }
-        }
-
-        function declName(decl: Declaration) {
-            if (!decl)
-                return "";
-            try {
-                return getName(decl) || "";
-            } catch {
-                return "";
-            }
         }
 
         function typeText(t: Type) {
@@ -1151,14 +1069,6 @@ namespace ts.pxtc {
             } catch {
                 return "";
             }
-        }
-
-        function classInfoName(info: ClassInfo) {
-            return info ? info.id || "" : "";
-        }
-
-        function traceValidationCheck(reason: string, node?: Node, details?: string[]) {
-            traceLowering("emitValidationCheck." + reason, node, details);
         }
 
         function sameClassInfo(a: ClassInfo, b: ClassInfo) {
@@ -1569,102 +1479,6 @@ namespace ts.pxtc {
             if (!info || !info.recordShapeKey)
                 return;
             info.recordNeedsInterfaceFields = true;
-            traceLowering("objectLiteralRecord.interfaceFieldsNeeded", node, [
-                `record=${info.id}`,
-                `reason=${reason}`,
-                `fields=${recordFieldsText(info)}`,
-                `shapeCount=${objectLiteralRecordShapeCount(info) || 0}`
-            ]);
-        }
-
-        function traceObjectLiteralRecordShapeReadDemand() {
-            if (!loweringTrace)
-                return;
-            for (const key of Object.keys(objectLiteralRecordClassInfos)) {
-                const count = objectLiteralRecordShapeReadCounts[key] || 0;
-                if (!count)
-                    continue;
-                const info = objectLiteralRecordClassInfos[key];
-                loweringTrace.push([
-                    "objectLiteralRecord.shapeReadDemand",
-                    "<analysis>",
-                    "text=",
-                    `record=${info.id}`,
-                    `fields=${recordFieldsText(info)}`,
-                    `shapeCount=${objectLiteralRecordShapeCounts[key] || 0}`,
-                    `shapeReadCount=${count}`
-                ].join(" | "));
-            }
-        }
-
-        function contextualOptionalOmissions(node: ObjectLiteralExpression, contextualType: Type) {
-            if (!contextualType || !isInterfaceType(contextualType))
-                return [] as string[];
-
-            const present: pxt.Map<boolean> = {};
-            for (const prop of node.properties) {
-                const name = objectLiteralPropertyName(prop);
-                if (name)
-                    present[name] = true;
-            }
-
-            return checker.getPropertiesOfType(contextualType)
-                .filter(prop => !!(prop.flags & SymbolFlags.Optional) && !present[prop.name])
-                .map(prop => prop.name);
-        }
-
-        function structuralUnionArmCount(contextualType: Type) {
-            if (!contextualType || !(contextualType.flags & TypeFlags.Union))
-                return 0;
-            const union = contextualType as UnionType;
-            return (union.types || []).filter(objectLiteralUnionRecordContextArm).length;
-        }
-
-        function objectLiteralImmediateUse(node: ObjectLiteralExpression) {
-            const parent = node.parent;
-            if (!parent)
-                return "unknown";
-            switch (parent.kind) {
-                case SK.VariableDeclaration:
-                    return "localInitializer";
-                case SK.ReturnStatement:
-                    return "return";
-                case SK.CallExpression:
-                    return "callArgument";
-                case SK.ArrayLiteralExpression:
-                    return "arrayElement";
-                case SK.PropertyAssignment:
-                    return "objectProperty";
-                case SK.BinaryExpression:
-                    return (parent as BinaryExpression).right == node ? "assignmentRight" : "binaryExpression";
-                case SK.ExpressionStatement:
-                    return "expressionStatement";
-                default:
-                    return kindName(parent.kind);
-            }
-        }
-
-        function incrementObjectLiteralRecordV2Attribution(details: string[]) {
-            if (!bin.finalPass)
-                return;
-            const key = details.join("\t");
-            objectLiteralRecordV2AttributionCounts[key] = (objectLiteralRecordV2AttributionCounts[key] || 0) + 1;
-        }
-
-        function traceObjectLiteralRecordV2AttributionSummary() {
-            if (!loweringTrace)
-                return;
-            Object.keys(objectLiteralRecordV2AttributionCounts)
-                .sort((a, b) => objectLiteralRecordV2AttributionCounts[b] - objectLiteralRecordV2AttributionCounts[a] || U.strcmp(a, b))
-                .forEach(key => {
-                    loweringTrace.push([
-                        "objectLiteralRecordV2.summary",
-                        "<analysis>",
-                        "text=",
-                        `count=${objectLiteralRecordV2AttributionCounts[key]}`,
-                        key.split("\t").join(" | ")
-                    ].join(" | "));
-                });
         }
 
         function ifaceCallKindCounts(ifaceIndex: number, getset: string) {
@@ -1698,27 +1512,6 @@ namespace ts.pxtc {
 
             const eligible: pxt.Map<boolean> = {};
             const seen: pxt.Map<boolean> = {};
-            const rejectionReasons: pxt.Map<pxt.Map<boolean>> = {};
-            const addRejectionReason = (proc: ir.Procedure, reason: string) => {
-                const key = proc.seqNo + "";
-                if (!rejectionReasons[key])
-                    rejectionReasons[key] = {};
-                rejectionReasons[key][reason] = true;
-            };
-            const exactIfaceWrapperRejectReason = (proc: ir.Procedure, ifaceIndex: number, getset: string) => {
-                if (!proc.info.usedAsIface)
-                    return "notUsedAsIface";
-                if (proc.args.length == 0)
-                    return "zeroArgs";
-                if (proc.action && isToString(proc.action))
-                    return "toStringVTable";
-                if (bin.dynamicIfaceCalls[ifaceIndex + ""])
-                    return "dynamicIfaceCall";
-                if (!getset && ifaceCallKindCounts(ifaceIndex, "get").length)
-                    return "methodHasGetterCalls";
-                const counts = ifaceCallKindCounts(ifaceIndex, getset);
-                return counts.some(c => c.numargs < proc.args.length) ? "observedArityTooSmall" : "";
-            };
             const note = (proc: ir.Procedure, ifaceIndex: number, getset: string) => {
                 if (!proc || proc.args.length == 0)
                     return;
@@ -1726,12 +1519,8 @@ namespace ts.pxtc {
                 seen[key] = true;
                 if (eligible[key] === undefined)
                     eligible[key] = true;
-                if (!canUseExactIfaceWrapper(proc, ifaceIndex, getset)) {
+                if (!canUseExactIfaceWrapper(proc, ifaceIndex, getset))
                     eligible[key] = false;
-                    const reason = exactIfaceWrapperRejectReason(proc, ifaceIndex, getset);
-                    if (reason)
-                        addRejectionReason(proc, reason);
-                }
             };
 
             for (const info of bin.usedClassInfos) {
@@ -1748,18 +1537,6 @@ namespace ts.pxtc {
             for (const proc of bin.procs) {
                 const key = proc.seqNo + "";
                 proc.useExactIfaceWrapper = !!seen[key] && !!eligible[key];
-                if (seen[key] && !proc.useExactIfaceWrapper) {
-                    const reasons = rejectionReasons[key];
-                    traceLowering("exactIfaceWrapper.rejected", undefined, [
-                        `proc=${proc.getFullName()}`,
-                        `label=${proc.label()}`,
-                        `numargs=${proc.args.length}`,
-                        `usedAsValue=${!!proc.info.usedAsValue}`,
-                        `usedAsIface=${!!proc.info.usedAsIface}`,
-                        `captured=${proc.captured.length}`,
-                        `reasons=${reasons ? Object.keys(reasons).sort().join(",") : "unknown"}`
-                    ]);
-                }
             }
         }
 
@@ -2323,24 +2100,6 @@ namespace ts.pxtc {
             return emitted;
         }
 
-        function traceObjectLiteralRecordInterfaceUse(node: Node, receiver: Expression, memberName: string, isSet: boolean, declKindText: string) {
-            if (!loweringTrace || !bin.finalPass || !objectLiteralRecords || !receiver)
-                return;
-            const recordUse = expressionRecordClassInfoWithSource(receiver);
-            if (!recordUse)
-                return;
-            traceLowering("objectLiteralRecord.interfaceUse", node, [
-                `record=${recordUse.info.id}`,
-                `member=${memberName || ""}`,
-                `fieldPresent=${!!tryGetFieldInfo(recordUse.info, memberName || "")}`,
-                `source=${recordUse.source}`,
-                `declKind=${declKindText || ""}`,
-                `isSet=${!!isSet}`,
-                `receiverType=${typeText(typeOf(receiver))}`,
-                `fields=${recordFieldsText(recordUse.info)}`
-            ]);
-        }
-
         function shouldPropagateCallParameterRecords(decl: EmittableAsCall) {
             if (!objectLiteralRecords || !decl || decl.kind != SK.FunctionDeclaration)
                 return false;
@@ -2458,7 +2217,6 @@ namespace ts.pxtc {
 
         analyzeObjectLiteralRecordProvenance();
         markProfitableObjectLiteralRecordClasses()
-        traceObjectLiteralRecordShapeReadDemand();
 
         layOutGlobals()
         needsUsingInfo = false
@@ -2478,7 +2236,6 @@ namespace ts.pxtc {
         bin.dynamicIfaceCalls = {}
         emit(rootFunction)
         markExactIfaceWrappers()
-        traceObjectLiteralRecordV2AttributionSummary()
 
         U.assert(usedWorkList.length == 0)
 
@@ -2515,9 +2272,6 @@ namespace ts.pxtc {
 
         if (compilerHooks.postBinary)
             compilerHooks.postBinary(program, opts, res)
-
-        if (loweringTrace)
-            res.outfiles["lowering-trace.txt"] = loweringTrace.join("\n") + "\n";
 
         return {
             diagnostics: resDiags,
@@ -3249,48 +3003,6 @@ ${lbl}: .short 0xffff
         function emitObjectLiteral(node: ObjectLiteralExpression) {
             const contextualType = checker.getContextualType(node);
             const recordCandidate = analyzeClosedObjectLiteral(node, contextualType);
-            const objectLiteralProperties = node.properties.map(p => objectLiteralPropertyName(p) || "");
-            const computedPropertyCount = node.properties.filter(p => p.kind != SK.SpreadAssignment && (p as PropertyAssignment | ShorthandPropertyAssignment).name && (p as PropertyAssignment | ShorthandPropertyAssignment).name.kind == SK.ComputedPropertyName).length;
-            const spreadPropertyCount = node.properties.filter(p => p.kind == SK.SpreadAssignment).length;
-            const optionalOmissions = contextualOptionalOmissions(node, contextualType);
-            const immediateUse = objectLiteralImmediateUse(node);
-            const structuralUnionArms = structuralUnionArmCount(contextualType);
-            const v2Bucket = !recordCandidate.eligible ? "notEligible" :
-                optionalOmissions.length ? "optionalOmissions" :
-                    spreadPropertyCount ? "spread" :
-                        computedPropertyCount ? "computed" :
-                            (immediateUse == "arrayElement" || immediateUse == "objectProperty") ? "storedInAggregate" :
-                                "narrowCandidate";
-            traceLowering("emitObjectLiteral.map", node, [
-                `type=${typeText(typeOf(node))}`,
-                `contextualType=${typeText(contextualType)}`,
-                `properties=${objectLiteralProperties.join(",")}`,
-                `native=${!!target.isNative}`
-            ]);
-            traceLowering("objectLiteralRecordCandidate", node, [
-                recordCandidate.eligible ? "accepted" : "rejected",
-                `reason=${recordCandidate.reason}`,
-                `contextualType=${typeText(contextualType)}`,
-                `fields=${recordCandidate.fields.join(",")}`
-            ]);
-            const recordV2Details = [
-                recordCandidate.eligible ? "acceptedRecordCandidate" : "rejectedRecordCandidate",
-                `v2Bucket=${v2Bucket}`,
-                `reason=${recordCandidate.reason}`,
-                `contextualType=${typeText(contextualType)}`,
-                `fields=${recordCandidate.fields.join(",")}`,
-                `properties=${objectLiteralProperties.join(",")}`,
-                `propertyCount=${node.properties.length}`,
-                `computedPropertyCount=${computedPropertyCount}`,
-                `spreadPropertyCount=${spreadPropertyCount}`,
-                `optionalOmissionCount=${optionalOmissions.length}`,
-                `optionalOmissions=${optionalOmissions.join(",")}`,
-                `immediateUse=${immediateUse}`,
-                `structuralUnionArms=${structuralUnionArms}`,
-                `native=${!!target.isNative}`
-            ];
-            traceLowering("objectLiteralRecordV2.candidate", node, recordV2Details);
-            incrementObjectLiteralRecordV2Attribution(recordV2Details);
             if (objectLiteralRecords && recordCandidate.eligible && !bin.finalPass) {
                 objectLiteralRecordShapeCounts[recordCandidate.shapeKey] = (objectLiteralRecordShapeCounts[recordCandidate.shapeKey] || 0) + 1;
                 noteObjectLiteralRecordTypeInfo(contextualType, getObjectLiteralRecordClassInfo(node, recordCandidate));
@@ -3298,27 +3010,8 @@ ${lbl}: .short 0xffff
                 noteObjectLiteralRecordTypeInfo(contextualType, null);
             }
             if (objectLiteralRecords && recordCandidate.eligible && objectLiteralRecordShapeIsProfitable(recordCandidate.shapeKey)) {
-                traceLowering("emitObjectLiteral.record", node, [
-                    `contextualType=${typeText(contextualType)}`,
-                    `fields=${recordCandidate.fields.join(",")}`,
-                    `shapeCount=${objectLiteralRecordShapeCounts[recordCandidate.shapeKey] || 0}`,
-                    `shapeReadCount=${objectLiteralRecordShapeReadCounts[recordCandidate.shapeKey] || 0}`
-                ]);
                 return emitObjectLiteralRecord(node, recordCandidate);
             }
-            traceLowering("emitObjectLiteral.mapEmit", node, [
-                recordCandidate.eligible ? "acceptedRecordCandidate" : "rejectedRecordCandidate",
-                `reason=${recordCandidate.reason}`,
-                `type=${typeText(typeOf(node))}`,
-                `contextualType=${typeText(contextualType)}`,
-                `fields=${recordCandidate.fields.join(",")}`,
-                `properties=${objectLiteralProperties.join(",")}`,
-                `propertyCount=${node.properties.length}`,
-                `computedPropertyCount=${computedPropertyCount}`,
-                `shapeCount=${recordCandidate.eligible ? objectLiteralRecordShapeCounts[recordCandidate.shapeKey] || 0 : 0}`,
-                `shapeReadCount=${recordCandidate.eligible ? objectLiteralRecordShapeReadCounts[recordCandidate.shapeKey] || 0 : 0}`,
-                `native=${!!target.isNative}`
-            ]);
             let expr = ir.shared(ir.rtcall("pxtrt::mkMap", []))
             node.properties.forEach((p: PropertyAssignment | ShorthandPropertyAssignment) => {
                 assert(!p.questionToken) // should be disallowed by TS grammar checker
@@ -3386,14 +3079,7 @@ ${lbl}: .short 0xffff
         function emitComputedPropertyName(node: ComputedPropertyName) { }
         function emitPropertyAccess(node: PropertyAccessExpression): ir.Expr {
             let decl = getDecl(node);
-            traceLowering("emitPropertyAccess", node, [
-                `declKind=${decl ? kindName(decl.kind) : ""}`,
-                `declName=${declName(decl)}`,
-                `receiverShape=${receiverShape(node.expression)}`,
-                `receiverText=${shortNodeText(node.expression)}`,
-                `receiverType=${typeText(typeOf(node.expression))}`,
-                `valueType=${typeText(typeOf(node))}`
-            ]);
+
 
             const fold = constantFoldDecl(decl)
             if (fold)
@@ -3418,28 +3104,12 @@ ${lbl}: .short 0xffff
                 if (recordInfo) {
                     const recordField = tryGetFieldInfo(recordInfo, node.name.text);
                     if (recordField) {
-                        traceLowering("emitPropertyAccess.recordFieldAccess", node, [
-                            `declKind=${kindName(decl.kind)}`,
-                            `declName=${declName(decl)}`,
-                            `record=${recordInfo.id}`,
-                            `source=${recordSource}`
-                        ]);
+
                         return ir.op(EK.FieldAccess, [emitExpr(node.expression)], fieldIndexCore(recordInfo, recordField, false));
                     }
-                    traceLowering("emitPropertyAccess.recordFieldMissing", node, [
-                        `declKind=${kindName(decl.kind)}`,
-                        `declName=${declName(decl)}`,
-                        `record=${recordInfo.id}`,
-                        `source=${recordSource}`
-                    ]);
+
                 }
-                traceLowering("emitPropertyAccess.propertyCall", node, [
-                    `declKind=${kindName(decl.kind)}`,
-                    `declName=${declName(decl)}`,
-                    recordInfo ? `record=${recordInfo.id}` : "",
-                    recordInfo ? `recordFieldPresent=${!!tryGetFieldInfo(recordInfo, node.name.text)}` : "",
-                    recordInfo ? `source=${recordSource}` : ""
-                ]);
+
                 return emitCallCore(node, node, [], null, decl as any, node.expression)
             } else if (decl.kind == SK.PropertyDeclaration || decl.kind == SK.Parameter) {
                 if (isStatic(decl)) {
@@ -3447,10 +3117,7 @@ ${lbl}: .short 0xffff
                 }
                 if (isSlowField(decl)) {
                     // treat as interface call
-                    traceLowering("emitPropertyAccess.slowFieldCall", node, [
-                        `declKind=${kindName(decl.kind)}`,
-                        `declName=${declName(decl)}`
-                    ]);
+
                     return emitCallCore(node, node, [], null, decl as any, node.expression)
                 } else {
                     let idx = fieldIndex(node)
@@ -3462,31 +3129,7 @@ ${lbl}: .short 0xffff
                     } else {
                         if (idx.needsCheck && !target.switches.skipClassCheck) {
                             bin.checkedFieldAccessCounts[checkedFieldAccessCountKey(idx)] = (bin.checkedFieldAccessCounts[checkedFieldAccessCountKey(idx)] || 0) + 1;
-                            traceValidationCheck("fieldAccess", node, [
-                                `declKind=${kindName(decl.kind)}`,
-                                `declName=${declName(decl)}`,
-                                `class=${classInfoName(idx.classInfo)}`,
-                                `field=${idx.name}`,
-                                `receiverShape=${receiverShape(node.expression)}`,
-                                `receiverText=${shortNodeText(node.expression)}`,
-                                `receiverType=${typeText(typeOf(node.expression))}`
-                            ]);
-                        } else if (idx.checkElisionReason == "concreteReceiver") {
-                            traceValidationCheck("fieldAccessElided", node, [
-                                `declKind=${kindName(decl.kind)}`,
-                                `declName=${declName(decl)}`,
-                                `class=${classInfoName(idx.classInfo)}`,
-                                `field=${idx.name}`,
-                                `reason=${idx.checkElisionReason}`,
-                                `receiverShape=${receiverShape(node.expression)}`,
-                                `receiverText=${shortNodeText(node.expression)}`,
-                                `receiverType=${typeText(typeOf(node.expression))}`
-                            ]);
                         }
-                        traceLowering("emitPropertyAccess.fieldAccess", node, [
-                            `declKind=${kindName(decl.kind)}`,
-                            `declName=${declName(decl)}`
-                        ]);
                         return ir.op(EK.FieldAccess, [emitExpr(node.expression)], idx)
                     }
                 }
@@ -3533,15 +3176,6 @@ ${lbl}: .short 0xffff
                 indexer = "String_::charAt"
             } else if (isArrayType(t)) {
                 indexer = assign ? "Array_::setAt" : "Array_::getAt"
-                traceLowering("emitIndexedAccess.array", node, [
-                    `op=${assign ? "set" : "get"}`,
-                    `receiverShape=${receiverShape(node.expression)}`,
-                    `receiverType=${typeText(t)}`,
-                    `argumentKind=${kindName(node.argumentExpression.kind)}`,
-                    `argumentText=${shortNodeText(node.argumentExpression)}`,
-                    `argumentType=${typeText(typeOf(node.argumentExpression))}`,
-                    `argumentNumberLike=${isNumberLike(node.argumentExpression)}`
-                ])
             } else if (isInterfaceType(t)) {
                 attrs = parseCommentsOnSymbol(t.symbol)
                 indexer = assign ? attrs.indexerSet : attrs.indexerGet
@@ -3554,17 +3188,6 @@ ${lbl}: .short 0xffff
                     ? (mapOnlySet ? "pxtrt::mapSetByStringOnly" : "pxtrt::mapSetGeneric")
                     : "pxtrt::mapGetGeneric"
                 stringOk = true
-                traceLowering("emitIndexedAccess.generic", node, [
-                    `op=${assign ? "set" : "get"}`,
-                    `mapOnlySet=${mapOnlySet}`,
-                    `receiverType=${checker.typeToString(t)}`,
-                    `receiverFlags=${t.flags}`,
-                    `receiverAny=${!!(t.flags & TypeFlags.Any)}`,
-                    `receiverStructured=${!!(t.flags & TypeFlags.StructuredOrTypeVariable)}`,
-                    `receiverIndexSignature=${hasIndexSignature}`,
-                    `argumentKind=${kindName(node.argumentExpression.kind)}`,
-                    `argumentText=${shortNodeText(node.argumentExpression)}`
-                ])
             }
 
             if (indexer) {
@@ -3986,16 +3609,7 @@ ${lbl}: .short 0xffff
                     U.assert(funcExpr.kind == SK.PropertyAccessExpression);
                     const fieldName = (funcExpr as PropertyAccessExpression).name.text
                     const ifaceIndex = getIfaceMemberId(fieldName, true);
-                    traceLowering("emitCallCore.dynamicIfaceCall", node, [
-                        `field=${fieldName}`,
-                        `ifaceIndex=${ifaceIndex}`,
-                        recv ? `receiverShape=${receiverShape(recv)}` : "",
-                        recv ? `receiverText=${shortNodeText(recv)}` : "",
-                        recv ? `receiverType=${typeText(typeOf(recv))}` : "",
-                        `noArgs=${!!noArgs}`
-                    ]);
                     bin.dynamicIfaceCalls[ifaceIndex + ""] = true;
-                    traceObjectLiteralRecordInterfaceUse(node, recv, fieldName, noArgs && args.length == 2, "dynamic");
                     // completely dynamic dispatch
                     return mkMethodCall(args.map((x) => emitEscapedExpression(x, "callArgument")), {
                         ifaceIndex,
@@ -4024,16 +3638,6 @@ ${lbl}: .short 0xffff
                     }
 
                     U.assert(!bin.finalPass || info.virtualIndex != null, "!bin.finalPass || info.virtualIndex != null")
-                    if (args[0].kind != SK.ThisKeyword && !target.switches.skipClassCheck) {
-                        traceValidationCheck("virtualReceiver", node, [
-                            `declKind=${kindName(decl.kind)}`,
-                            `declName=${declName(decl)}`,
-                            `class=${classInfoName(info.parentClassInfo)}`,
-                            recv ? `receiverShape=${receiverShape(recv)}` : "",
-                            recv ? `receiverText=${shortNodeText(recv)}` : "",
-                            recv ? `receiverType=${typeText(typeOf(recv))}` : ""
-                        ]);
-                    }
                     return mkMethodCall(args.map((x) => emitEscapedExpression(x, "callArgument")), {
                         classInfo: info.parentClassInfo,
                         virtualIndex: info.virtualIndex,
@@ -4079,25 +3683,6 @@ ${lbl}: .short 0xffff
                     const helperGetSet = callKind == "call" ? "" : callKind;
                     const countKey = `${ifaceIndex}:${args.length}:${helperGetSet || "call"}`;
                     bin.ifaceCallCounts[countKey] = (bin.ifaceCallCounts[countKey] || 0) + 1;
-                    const recordUse = recv ? expressionRecordClassInfoWithSource(recv) : null;
-                    traceLowering("emitCallCore.ifaceCall", node, [
-                        `declKind=${kindName(decl.kind)}`,
-                        `declName=${declName(decl)}`,
-                        `ifaceIndex=${ifaceIndex}`,
-                        `callKind=${callKind}`,
-                        `helperKey=ifacecall${args.length}_${helperGetSet}`,
-                        recv ? `receiverShape=${receiverShape(recv)}` : "",
-                        recv ? `receiverText=${shortNodeText(recv)}` : "",
-                        recv ? `receiverType=${typeText(typeOf(recv))}` : "",
-                        recordUse ? `record=${recordUse.info.id}` : "",
-                        recordUse ? `recordSource=${recordUse.source}` : "",
-                        recordUse ? `recordFieldPresent=${!!tryGetFieldInfo(recordUse.info, getName(decl))}` : "",
-                        `needsVCall=${!!needsVCall}`,
-                        `forceMethod=${!!forceMethod}`,
-                        `noArgs=${!!noArgs}`,
-                        `isSet=${isSet}`
-                    ]);
-                    traceObjectLiteralRecordInterfaceUse(node, recv, getName(decl), isSet, kindName(decl.kind));
                     return mkMethodCall(args.map((x) => emitEscapedExpression(x, "callArgument")), {
                         ifaceIndex,
                         isSet,
@@ -4832,10 +4417,7 @@ ${lbl}: .short 0xffff
 
             switch (node.operator) {
                 case SK.ExclamationToken:
-                    traceLowering("emitBooleanNot", node, [
-                        `operandKind=${kindName(node.operand.kind)}`,
-                        `operandType=${typeText(typeOf(node.operand))}`
-                    ]);
+
                     return fromBool(ir.rtcall("Boolean_::bang", [emitCondition(node.operand)]))
                 case SK.PlusPlusToken:
                     return emitIncrement(node.operand, "numops::adds", false)
@@ -4847,11 +4429,7 @@ ${lbl}: .short 0xffff
                     let v = valueToInt(inner)
                     if (v != null)
                         return emitLit(-v)
-                    traceLowering("emitUnaryNumericOp", node, [
-                        `operator=${kindName(node.operator)}`,
-                        `operandKind=${kindName(node.operand.kind)}`,
-                        `operandType=${typeText(typeOf(node.operand))}`
-                    ]);
+
                     if (node.operator == SK.MinusToken)
                         return emitIntOp("numops::subs", emitLit(0), inner)
                     else
@@ -5014,11 +4592,7 @@ ${lbl}: .short 0xffff
                     const fieldName = (trg as PropertyAccessExpression).name.text;
                     const recordField = recordInfo ? tryGetFieldInfo(recordInfo, fieldName) : null;
                     if (recordField) {
-                        traceLowering("emitStore.recordFieldStore", trg, [
-                            `declKind=${kindName(decl.kind)}`,
-                            `declName=${declName(decl)}`,
-                            `record=${recordInfo.id}`
-                        ]);
+
                         const targetExpr = ir.op(EK.FieldAccess, [emitExpr(receiver)], fieldIndexCore(recordInfo, recordField, false));
                         proc.emitExpr(ir.op(EK.Store, [targetExpr, emitEscapedExpression(src, "assignment")]));
                     } else {
@@ -5036,18 +4610,6 @@ ${lbl}: .short 0xffff
                                 // Reading a shimmed property
                                 proc.emitExpr(emitCallCore(trg, trg, [src], null, decl as FunctionLikeDeclaration))
                                 break;
-                            }
-                            if (idx.needsCheck && !target.switches.skipClassCheck) {
-                                const pacc = trg as PropertyAccessExpression;
-                                traceValidationCheck("fieldStore", trg, [
-                                    decl ? `declKind=${kindName(decl.kind)}` : "",
-                                    decl ? `declName=${declName(decl)}` : "",
-                                    `class=${classInfoName(idx.classInfo)}`,
-                                    `field=${idx.name}`,
-                                    `receiverShape=${receiverShape(pacc.expression)}`,
-                                    `receiverText=${shortNodeText(pacc.expression)}`,
-                                    `receiverType=${typeText(typeOf(pacc.expression))}`
-                                ]);
                             }
                         }
                         let trg2 = emitExpr(trg)
@@ -5488,25 +5050,7 @@ ${lbl}: .short 0xffff
                     let t = getRefTagToValidate(f)
                     if (t) {
                         const refTagProof = expressionConstructsRefTag(a, t);
-                        if (refTagProof) {
-                            traceValidationCheck("runtimeCallArgumentElided", a, [
-                                `shim=${name}`,
-                                `argIndex=${i}`,
-                                `refTag=${t}`,
-                                `reason=${refTagProof}`,
-                                `nullable=${!!attrs.argsNullable}`,
-                                `argShape=${receiverShape(a)}`,
-                                `argType=${typeText(typeOf(a))}`
-                            ]);
-                        } else {
-                            traceValidationCheck("runtimeCallArgument", a, [
-                                `shim=${name}`,
-                                `argIndex=${i}`,
-                                `refTag=${t}`,
-                                `nullable=${!!attrs.argsNullable}`,
-                                `argShape=${receiverShape(a)}`,
-                                `argType=${typeText(typeOf(a))}`
-                            ]);
+                        if (!refTagProof) {
                             convInfos.push({
                                 argIdx: i,
                                 method: "_validate",
@@ -5560,10 +5104,7 @@ ${lbl}: .short 0xffff
             })
             let skipNativeReturnConversion = false
             if (opts.target.isNative && isThumb() && name == "Array_::length" && fmt[0] == "I") {
-                traceLowering("emitRuntimeReturnConversion.arrayLengthTagged", args[0], [
-                    "conversion=fromInt",
-                    `shim=${name}`
-                ]);
+
                 name = "_pxt_array_length_tagged"
                 skipNativeReturnConversion = true
             }
@@ -5575,16 +5116,10 @@ ${lbl}: .short 0xffff
             if (opts.target.isNative && !skipNativeReturnConversion) {
                 let f0 = fmt[0]
                 if (f0 == "I") {
-                    traceLowering("emitRuntimeReturnConversion", args[0], [
-                        "conversion=fromInt",
-                        `shim=${name}`
-                    ]);
+
                     r = fromInt(r)
                 } else if (f0 == "B") {
-                    traceLowering("emitRuntimeReturnConversion", args[0], [
-                        "conversion=fromBool",
-                        `shim=${name}`
-                    ]);
+
                     r = fromBool(r)
                 } else if (f0 == "F")
                     r = fromFloat(r)
@@ -5621,13 +5156,7 @@ ${lbl}: .short 0xffff
             let lbl = proc.mkLabel("lazy")
 
             left = ir.shared(left)
-            traceLowering("emitLazyBinary.toBool", node, [
-                `operator=${kindName(node.operatorToken.kind)}`,
-                `leftKind=${kindName(node.left.kind)}`,
-                `leftType=${typeText(typeOf(node.left))}`,
-                `rightKind=${kindName(node.right.kind)}`,
-                `rightType=${typeText(typeOf(node.right))}`
-            ]);
+
             let cond = ir.rtcall("numops::toBool", [left])
             let lblSkip = proc.mkLabel("lazySkip")
             let mode: ir.JmpMode =
@@ -5768,17 +5297,7 @@ ${lbl}: .short 0xffff
             }
 
             let shim = (n: string) => {
-                const originalName = n;
                 n = mapIntOpName(n)
-                traceLowering("emitNumericOp", node, [
-                    `op=${n}`,
-                    `originalOp=${originalName}`,
-                    `operator=${kindName(node.operatorToken.kind)}`,
-                    `leftKind=${kindName(node.left.kind)}`,
-                    `leftType=${typeText(typeOf(node.left))}`,
-                    `rightKind=${kindName(node.right.kind)}`,
-                    `rightType=${typeText(typeOf(node.right))}`
-                ]);
                 let args = [node.left, node.right]
                 return ir.rtcallMask(n, getMask(args), ir.CallingConvention.Plain, args.map(x => emitExpr(x)))
             }
@@ -5889,13 +5408,7 @@ ${lbl}: .short 0xffff
                 const binary = expr as BinaryExpression;
                 const op = binary.operatorToken.kind;
                 if (op == SK.AmpersandAmpersandToken || op == SK.BarBarToken) {
-                    traceLowering("emitCondition.lazyBooleanDirect", expr, [
-                        `operator=${kindName(op)}`,
-                        `leftKind=${kindName(binary.left.kind)}`,
-                        `leftType=${typeText(typeOf(binary.left))}`,
-                        `rightKind=${kindName(binary.right.kind)}`,
-                        `rightType=${typeText(typeOf(binary.right))}`
-                    ]);
+
                     const shortCircuitLabel = proc.mkLabel("lazycond");
                     const doneLabel = proc.mkLabel("lazycondfin");
                     if (op == SK.AmpersandAmpersandToken) {
@@ -5918,10 +5431,7 @@ ${lbl}: .short 0xffff
             if (!inner && !isStackMachine() && expr.kind == SK.PrefixUnaryExpression) {
                 const unary = expr as PrefixUnaryExpression;
                 if (unary.operator == SK.ExclamationToken) {
-                    traceLowering("emitCondition.booleanNotDirect", expr, [
-                        `operandKind=${kindName(unary.operand.kind)}`,
-                        `operandType=${typeText(typeOf(unary.operand))}`
-                    ]);
+
                     return ir.rtcall("Boolean_::bang", [emitCondition(unary.operand)])
                 }
             }
@@ -5929,14 +5439,7 @@ ${lbl}: .short 0xffff
                 let be = expr as BinaryExpression
                 let mapped = U.lookup(thumbCmpMap, simpleInstruction(be, be.operatorToken.kind))
                 if (mapped) {
-                    traceLowering("emitCondition.thumbCompare", expr, [
-                        `op=${mapped}`,
-                        `operator=${kindName(be.operatorToken.kind)}`,
-                        `leftKind=${kindName(be.left.kind)}`,
-                        `leftType=${typeText(typeOf(be.left))}`,
-                        `rightKind=${kindName(be.right.kind)}`,
-                        `rightType=${typeText(typeOf(be.right))}`
-                    ]);
+
                     return ir.rtcall(mapped, [emitExpr(be.left), emitExpr(be.right)])
                 }
             }
@@ -5944,10 +5447,7 @@ ${lbl}: .short 0xffff
                 inner = emitExpr(expr)
             if (isStackMachine())
                 return inner
-            traceLowering("emitCondition.toBoolDecr", expr, [
-                `exprKind=${kindName(expr.kind)}`,
-                `exprType=${typeText(typeOf(expr))}`
-            ]);
+
             return ir.rtcall("numops::toBoolDecr", [inner])
         }
         function emitIfStatement(node: IfStatement) {
@@ -6206,13 +5706,7 @@ ${lbl}: .short 0xffff
                     // switch_eq() will decr(expr) if result is true
                     let cmpCall = ir.rtcallMask(mapIntOpName("pxt::switch_eq"),
                         mask, ir.CallingConvention.Plain, [cmpExpr, expr])
-                    traceLowering("emitSwitchCompare", cc.expression, [
-                        `op=${mapIntOpName("pxt::switch_eq")}`,
-                        `caseKind=${kindName(cc.expression.kind)}`,
-                        `caseType=${typeText(typeOf(cc.expression))}`,
-                        `switchType=${typeText(typeOf(node.expression))}`,
-                        `mask=${mask}`
-                    ]);
+
                     proc.emitJmp(lbl, cmpCall, ir.JmpMode.IfNotZero, expr)
                 } else if (cl.kind == SK.DefaultClause) {
                     // Save default label for emit at the end of the
@@ -6448,11 +5942,7 @@ ${lbl}: .short 0xffff
                 const info = getClassInfo(objType)
                 const idx = fieldIndexCore(info, getFieldInfo(info, fieldName))
                 if (idx.needsCheck && !target.switches.skipClassCheck) {
-                    traceValidationCheck("bindingFieldAccess", node, [
-                        `class=${classInfoName(idx.classInfo)}`,
-                        `field=${idx.name}`,
-                        `receiverType=${typeText(objType)}`
-                    ]);
+
                 }
                 exres = ir.op(EK.FieldAccess, [objRef], idx)
             } else {
@@ -6850,7 +6340,6 @@ ${lbl}: .short 0xffff
         writeFile = (fn: string, cont: string) => { };
 
         trace: boolean;
-        loweringTrace: string[];
         breakpoints: boolean;
         name: string;
 

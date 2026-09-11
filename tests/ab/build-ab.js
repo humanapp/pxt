@@ -1,9 +1,15 @@
 /*
- * Builds candidate and reference hexes for every hw-ab device project.
+ * Builds the candidate and reference artifacts for every case in a suite.
  *
  * The candidate is this checkout's compiler with no switches. The reference is
  * the same compiler with opt-out switches set, which is only meaningful when
  * the compiler actually implements them; see the identical-hash guard below.
+ *
+ * Both sides are built the same way whichever backend will run them: the
+ * artifact kind is the only difference (a hex to flash, or the JS the sim
+ * runtime executes), and it is chosen with --artifact. Generation and building
+ * are shared by both legs of an A/B -- only the capture stage is bound to a
+ * backend.
  */
 
 "use strict";
@@ -11,21 +17,19 @@
 const fs = require("fs");
 const path = require("path");
 const crypto = require("crypto");
-const { spawnSync } = require("child_process");
 
-const isWindows = process.platform === "win32";
+const cases = require("./lib/cases");
 
-const hwabDir = __dirname;
-const pxtDir = path.resolve(hwabDir, "..", "..");
-const targetSpec = process.env.PXT_TARGET_DIR || path.join(pxtDir, "..", "pxt-microbit");
-const outDir = path.join(hwabDir, "out");
+const abDir = __dirname;
+const pxtDir = path.resolve(abDir, "..", "..");
+const DEFAULT_OUT = path.join(abDir, "out");
 
 const USAGE = [
-    "Usage: node tests/hw-ab/build-ab.js [options]",
+    "Usage: node tests/ab/build-ab.js [options]",
     "",
-    "Builds the hw-ab device projects twice -- once as the candidate (this",
-    "checkout's compiler, no switches) and once as the reference -- and collects the",
-    "hexes into tests/hw-ab/out/<case>/{candidate,reference}.hex.",
+    "Builds a suite's projects twice -- once as the candidate (this checkout's",
+    "compiler, no switches) and once as the reference -- and collects the artifacts",
+    "into <out>/<case>/{candidate,reference}.<ext>.",
     "",
     "Options:",
     "  --ref-switches \"<list>\"  compile switches for the reference build; required",
@@ -39,7 +43,16 @@ const USAGE = [
     "  --candidate-only         build only the candidate",
     "  --reference-only         build only the reference; without --ref-switches",
     "                           this builds the current checkout as-is and files",
-    "                           it under reference.hex (the git-based strategy)",
+    "                           it under reference.<ext> (the git-based strategy)",
+    "  --suite <id>             case suite (default langtest; also: " +
+        cases.suiteIds().filter(s => s !== "langtest").join(" ") + ")",
+    "  --artifact <hex|js>      what to build (default: the suite's own kind --",
+    "                           hex for a hardware leg, js for a sim leg)",
+    "  --target <dir>           target checkout to build in",
+    "  --out <dir>              artifact root (default tests/ab/out)",
+    "  --pxt <pxt.js>           build with this CLI instead of the pxt on PATH;",
+    "                           a target's own node_modules/pxt-core/built/pxt.js",
+    "                           pins the build to that snapshot",
     "  -h, --help               this text",
     "",
     "Environment:",
@@ -62,15 +75,16 @@ const USAGE = [
     "",
     "    # reference side",
     "    git -C <pxt> checkout <reference-commit> && npm run build",
-    "    node tests/hw-ab/build-ab.js --reference-only --v2-only",
+    "    node tests/ab/build-ab.js --reference-only --v2-only",
     "",
     "    # candidate side",
     "    git -C <pxt> checkout <candidate-branch> && npm run build",
-    "    node tests/hw-ab/build-ab.js --candidate-only --v2-only",
+    "    node tests/ab/build-ab.js --candidate-only --v2-only",
     "",
-    "The two runs fill out/<case>/reference.hex and candidate.hex side by side;",
-    "out/ is preserved between runs. That also means a stale hex from an earlier",
-    "run will happily pair with a fresh one -- check sizes.txt if in doubt.",
+    "The two runs fill <out>/<case>/reference.<ext> and candidate.<ext> side by",
+    "side; <out>/ is preserved between runs. That also means a stale artifact from",
+    "an earlier run will happily pair with a fresh one -- check sizes.txt if in",
+    "doubt.",
     "",
     "Exit codes: 0 built, 1 usage or build error, 3 identical-hash guard tripped."
 ].join("\n");
@@ -88,19 +102,37 @@ let refSwitches = "";
 let v2Only = false;
 let doCandidate = true;
 let doReference = true;
+let suiteId = "langtest";
+let artifactId = "";
+let targetSpec = "";
+let outDir = DEFAULT_OUT;
+let pxtCli = "";
 
 const argv = process.argv.slice(2);
 for (let i = 0; i < argv.length; i++) {
     const arg = argv[i];
+    const next = () => {
+        if (i + 1 >= argv.length) fail(arg + " needs a value");
+        return argv[++i];
+    };
     if (arg === "--ref-switches") {
-        if (i + 1 >= argv.length) fail("--ref-switches needs a value");
-        refSwitches = argv[++i];
+        refSwitches = next();
     } else if (arg === "--v2-only") {
         v2Only = true;
     } else if (arg === "--candidate-only") {
         doReference = false;
     } else if (arg === "--reference-only") {
         doCandidate = false;
+    } else if (arg === "--suite") {
+        suiteId = next();
+    } else if (arg === "--artifact") {
+        artifactId = next();
+    } else if (arg === "--target") {
+        targetSpec = next();
+    } else if (arg === "--out") {
+        outDir = path.resolve(next());
+    } else if (arg === "--pxt") {
+        pxtCli = path.resolve(next());
     } else if (arg === "-h" || arg === "--help") {
         usage(process.stdout);
         process.exit(0);
@@ -123,49 +155,35 @@ if (doReference && doCandidate && !refSwitches)
         "git-based strategy (--reference-only / --candidate-only per " +
         "checkout; see --help)");
 
-let targetDir = "";
+if (!cases.SUITES[suiteId])
+    fail("'" + suiteId + "' is not a suite -- expected " + cases.suiteIds().join(" or "));
+if (!artifactId) artifactId = cases.suite(suiteId).artifact;
+if (!cases.ARTIFACTS[artifactId])
+    fail("'" + artifactId + "' is not an artifact kind -- expected " +
+        Object.keys(cases.ARTIFACTS).join(" or "));
+
+let target;
 try {
-    const resolved = fs.realpathSync(targetSpec);
-    if (fs.statSync(resolved).isDirectory()) targetDir = resolved;
+    target = cases.targetInfo(targetSpec || null);
 } catch (e) {
-    targetDir = "";
-}
-if (!targetDir || !fs.existsSync(path.join(targetDir, "pxtarget.json")))
-    fail("no pxtarget.json in '" + targetSpec + "' (set PXT_TARGET_DIR)");
-
-// A PATH lookup, not a trial run: `pxt --version` exits nonzero when it is not
-// invoked inside a target checkout, so its exit status cannot answer "is the
-// CLI installed".
-function onPath(cmd) {
-    const dirs = (process.env.PATH || "").split(path.delimiter).filter(Boolean);
-    const exts = isWindows
-        ? (process.env.PATHEXT || ".COM;.EXE;.BAT;.CMD").split(";").filter(Boolean)
-        : [""];
-    for (const dir of dirs) {
-        for (const ext of exts) {
-            try {
-                fs.accessSync(path.join(dir, cmd + ext), fs.constants.X_OK);
-                return true;
-            } catch (e) { /* keep looking */ }
-        }
-    }
-    return false;
+    fail(e.message.replace(/^cases: /, ""));
 }
 
-if (!onPath("pxt"))
-    fail("no 'pxt' on PATH -- install the pxt CLI (npm i -g pxt)");
-if (!fs.existsSync(path.join(pxtDir, "built", "pxt.js")))
-    fail("missing " + path.join(pxtDir, "built", "pxt.js") +
-        " -- run 'npm run build' in " + pxtDir + " first");
+if (!pxtCli) {
+    if (!cases.onPath("pxt"))
+        fail("no 'pxt' on PATH -- install the pxt CLI (npm i -g pxt), or name one " +
+            "with --pxt <path to pxt.js>");
+    if (!fs.existsSync(path.join(pxtDir, "built", "pxt.js")))
+        fail("missing " + path.join(pxtDir, "built", "pxt.js") +
+            " -- run 'npm run build' in " + pxtDir + " first");
+} else if (!fs.existsSync(pxtCli)) {
+    fail("no such pxt CLI: " + pxtCli);
+}
 
-const projRoot = path.join(targetDir, "projects", "hw-ab");
+const artifactExt = cases.artifact(artifactId).ext;
 
 function sha256(file) {
     return crypto.createHash("sha256").update(fs.readFileSync(file)).digest("hex");
-}
-
-function nowSeconds() {
-    return Math.floor(Date.now() / 1000);
 }
 
 function pad(s, width) {
@@ -180,76 +198,71 @@ function joinSwitches(a, b) {
     return a && b ? a + "," + b : a + b;
 }
 
-process.stdout.write("build-ab: pxt      " + pxtDir + "\n");
-process.stdout.write("build-ab: target   " + targetDir + "\n");
+process.stdout.write("build-ab: pxt      " + (pxtCli || pxtDir) + "\n");
+process.stdout.write("build-ab: target   " + target.dir + "\n");
+process.stdout.write("build-ab: suite    " + suiteId + " (" + artifactId + ")\n");
 process.stdout.write("build-ab: variant  " + (variantSw || "<universal V1+V2>") + "\n");
 process.stdout.write("build-ab: ref sw   " +
     (!doReference ? "<no reference build>" : refSwitches || "<none: checkout as-is>") + "\n");
 process.stdout.write("\n");
 
-const gen = spawnSync(process.execPath, [path.join(hwabDir, "gen-project.js")],
-    { stdio: "inherit" });
-if (gen.error) fail("could not run gen-project.js: " + gen.error.message);
-if (gen.status !== 0) process.exit(gen.status === null ? 1 : gen.status);
-const casesFile = path.join(projRoot, "cases.txt");
-if (!fs.existsSync(casesFile)) fail("gen-project.js produced no cases.txt");
-process.stdout.write("\n");
+let generated;
+try {
+    generated = cases.generate({
+        target: target.dir,
+        suite: suiteId,
+        log: line => process.stdout.write("build-ab: gen " + line + "\n")
+    });
+} catch (e) {
+    fail(e.message.replace(/^cases: /, ""));
+}
+process.stdout.write("build-ab: " + generated.names.length + " project(s) in " +
+    generated.root + "\n\n");
 
 function buildOne(caseName, mode, switches) {
-    const proj = path.join(projRoot, caseName);
-    const dest = path.join(outDir, caseName, mode + ".hex");
+    const proj = cases.projectDir(target, suiteId, caseName);
+    const dest = path.join(outDir, caseName, mode + artifactExt);
     const logPath = path.join(outDir, caseName, mode + ".build.log");
 
-    if (!fs.existsSync(proj)) fail("missing project " + proj);
     fs.mkdirSync(path.dirname(dest), { recursive: true });
-
-    // A stale built/ can hand back the previous mode's output.
-    fs.rmSync(path.join(proj, "built"), { recursive: true, force: true });
 
     process.stdout.write("build-ab: " + pad(caseName, 22) + " " + pad(mode, 10) +
         " switches=" + (switches || "<none>") + "\n");
-    const t0 = nowSeconds();
 
-    const env = Object.assign({}, process.env);
-    if (switches) env.PXT_COMPILE_SWITCHES = switches;
-    else delete env.PXT_COMPILE_SWITCHES;
-
-    // shell:true on Windows so the pxt.cmd shim resolves; the log fd is handed
-    // to both stdout and stderr so the two interleave as they did on a console.
-    const logFd = fs.openSync(logPath, "w");
-    let res;
+    let built;
     try {
-        res = spawnSync("pxt", ["build"], {
-            cwd: proj,
-            env: env,
-            stdio: ["ignore", logFd, logFd],
-            shell: isWindows
+        built = cases.build({
+            projectDir: proj,
+            artifact: artifactId,
+            switches: switches,
+            pxtCli: pxtCli || null,
+            logPath: logPath
         });
-    } finally {
-        fs.closeSync(logFd);
+    } catch (e) {
+        fail(e.message.replace(/^cases: /, ""));
     }
 
-    if (res.error || res.status !== 0) {
+    if (!built.ok) {
         const log = fs.existsSync(logPath) ? fs.readFileSync(logPath, "utf8") : "";
         const lines = log.split("\n");
         if (lines.length && lines[lines.length - 1] === "") lines.pop();
         for (const line of lines) process.stderr.write("  | " + line + "\n");
-        if (res.error) process.stderr.write("  | " + res.error.message + "\n");
+        if (built.error) process.stderr.write("  | " + built.error + "\n");
+        if (built.status === 0)
+            fail(caseName + "/" + mode + " built no " + path.basename(built.artifactPath));
         fail(caseName + "/" + mode + " build failed (log above)");
     }
-    const t1 = nowSeconds();
 
-    const binary = path.join(proj, "built", "binary.hex");
-    if (!fs.existsSync(binary)) fail(caseName + "/" + mode + " built no binary.hex");
-    fs.copyFileSync(binary, dest);
+    fs.copyFileSync(built.artifactPath, dest);
     process.stdout.write("build-ab:   -> " + dest + " (" +
-        fs.statSync(dest).size + " bytes, " + (t1 - t0) + "s)\n");
+        fs.statSync(dest).size + " bytes, " + built.seconds + "s)\n");
 }
 
 fs.mkdirSync(outDir, { recursive: true });
 const sizesFile = path.join(outDir, "sizes.txt");
 fs.writeFileSync(sizesFile, [
-    "# hw-ab build " + new Date().toISOString().replace(/\.[0-9]{3}Z$/, "Z"),
+    "# ab build " + new Date().toISOString().replace(/\.[0-9]{3}Z$/, "Z"),
+    "# suite: " + suiteId + " artifact: " + artifactId,
     "# variant: " + (variantSw || "universal"),
     "# reference switches: " + refSwitches,
     "# case mode bytes sha256",
@@ -258,27 +271,24 @@ fs.writeFileSync(sizesFile, [
 
 const identical = [];
 let pairs = 0;
-const cases = fs.readFileSync(casesFile, "utf8").split("\n")
-    .map(l => l.replace(/\r$/, ""))
-    .filter(l => l.length > 0);
 
-for (const caseName of cases) {
+for (const caseName of generated.names) {
     fs.mkdirSync(path.join(outDir, caseName), { recursive: true });
 
     if (doCandidate) buildOne(caseName, "candidate", variantSw);
     if (doReference) buildOne(caseName, "reference", joinSwitches(variantSw, refSwitches));
 
     for (const mode of ["candidate", "reference"]) {
-        const hex = path.join(outDir, caseName, mode + ".hex");
-        if (!fs.existsSync(hex)) continue;
+        const file = path.join(outDir, caseName, mode + artifactExt);
+        if (!fs.existsSync(file)) continue;
         fs.appendFileSync(sizesFile, caseName + " " + mode + " " +
-            fs.statSync(hex).size + " " + sha256(hex) + "\n");
+            fs.statSync(file).size + " " + sha256(file) + "\n");
     }
 
     if (doCandidate && doReference) {
         pairs++;
-        if (sha256(path.join(outDir, caseName, "candidate.hex")) ===
-            sha256(path.join(outDir, caseName, "reference.hex"))) {
+        if (sha256(path.join(outDir, caseName, "candidate" + artifactExt)) ===
+            sha256(path.join(outDir, caseName, "reference" + artifactExt))) {
             identical.push(caseName);
         }
     }
@@ -293,8 +303,8 @@ process.stdout.write("build-ab: sizes -> " + sizesFile + "\n");
 if (identical.length && identical.length === pairs) {
     process.stderr.write([
         "",
-        "build-ab: ERROR -- candidate and reference hexes are byte-identical for every",
-        "build-ab: case:",
+        "build-ab: ERROR -- candidate and reference artifacts are byte-identical for",
+        "build-ab: every case:",
         "build-ab:  " + identical.join(" "),
         "",
         "The reference build differs from the candidate only by the compile switches",
@@ -306,7 +316,8 @@ if (identical.length && identical.length === pairs) {
         "",
         "Check that the switch names are spelled as the compiler reads them, or use the",
         "git-based reference strategy instead (build-ab.js --help). An A/B run against",
-        "an identical hex would compare a build with itself and always report \"same\".",
+        "an identical artifact would compare a build with itself and always report",
+        "\"same\".",
         ""
     ].join("\n"));
     process.exit(3);

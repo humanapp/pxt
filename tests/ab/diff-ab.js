@@ -1,5 +1,5 @@
 /*
- * Compares two hw-ab serial captures.
+ * Compares two serial captures.
  *
  * Only the lines that carry a verdict or a trace are compared: HWAB banners,
  * ASSERT failures, and the prelude's own msg() progress lines. Everything a
@@ -18,9 +18,9 @@ const fs = require("fs");
 const path = require("path");
 
 const USAGE = [
-    "Usage: node tests/hw-ab/diff-ab.js <log-a> <log-b> [--case <name>]",
+    "Usage: node tests/ab/diff-ab.js <log-a> <log-b> [--case <name>]",
     "",
-    "Normalizes two run-capture.js logs and diffs them.",
+    "Normalizes two captured serial streams and diffs them.",
     "",
     "Normalization:",
     "  - CR stripped, blank lines dropped",

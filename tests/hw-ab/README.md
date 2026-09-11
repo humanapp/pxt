@@ -10,24 +10,36 @@ on a real micro:bit, and diff what the board prints. One board, three commands:
 Needs a micro:bit on USB and the prerequisites below.
 
 The programs it runs are the codegen corpus files from
-`tests/compile-test/lang-test0/` named in `gen-project.js`'s `CASES` table
-(coverage map: `README-codegen.md` there).
+`tests/compile-test/lang-test0/` named in the `LANG_CASES` table in
+`tests/ab/lib/cases.js` (coverage map: `README-codegen.md` there).
+
+## Where the workflow lives
+
+The machinery is `tests/ab`, which runs the same cases on a choice of capture
+backend -- a board, or the simulator runtime headlessly in node. This directory
+is the hardware spelling of it: `hwab.js` delegates to `tests/ab/ab.js` with
+`--backend hw` and this directory's `out/` as the artifact root, so the
+commands, paths, messages and exit codes below are unchanged.
+
+Read `tests/ab/README.md` for the leg model, the library API, the simulator
+backend and the known boundaries. This file stays the hardware guide: what the
+device prints, the soak procedure, panic numbers and troubleshooting.
 
 ## Contents
 
 | file | what it does |
 | --- | --- |
 | `hwab.js` | one entry point for the whole workflow; the normal interface |
-| `gen-project.js` | writes one device project per case (its `CASES` table, plus soak) under `<target>/projects/hw-ab/` |
-| `build-ab.js` | builds candidate and reference hexes into `out/` |
-| `run-capture.js` | flashes one hex and captures its serial output |
-| `diff-ab.js` | normalizes and diffs two captures |
+| `out/` | generated hexes, captures and build logs; gitignored |
+| `../ab/lib/cases.js` | writes one device project per case (its `LANG_CASES` table, plus soak) under `<target>/projects/hw-ab/` |
+| `../ab/build-ab.js` | builds candidate and reference hexes into `out/` |
+| `../ab/backends/hw.js` | flashes one hex and captures its serial output |
+| `../ab/diff-ab.js` | normalizes and diffs two captures |
 
-`out/` is generated and gitignored.
-
-To add a case: add one entry to the `CASES` table in `gen-project.js`.
-Everything downstream -- the build, `hwab`, the `cases` listing -- reads the
-generated `cases.txt`, so nothing else needs editing.
+To add a case: add one entry to the `LANG_CASES` table in
+`tests/ab/lib/cases.js`. Everything downstream -- the build, `hwab`, the
+`cases` listing -- reads the generated `cases.txt`, so nothing else needs
+editing.
 
 ## Commands
 
@@ -54,9 +66,10 @@ Two invocation forms:
 Exit codes are the underlying script's, verbatim; `ab` reports the first
 failing stage's.
 
-The underlying scripts remain directly invocable as `node tests/hw-ab/<name>.js`
-for scripting and debugging -- the wrapper only assembles their arguments, and
-each script's own `--help` documents its full contract.
+The underlying scripts remain directly invocable for scripting and debugging --
+`node tests/ab/ab.js <command>`, and the backends and `diff-ab.js` beneath it.
+The wrapper only assembles their arguments, and each script's own `--help`
+documents its full contract.
 
 ## Prerequisites
 
@@ -131,10 +144,10 @@ time -- `capture <case> candidate`, `capture <case> reference`, `diff <case>` --
 which is what to reach for when the two sides are run on different boards or at
 different times.
 
-`run-capture.js` exits 0 on `HWAB PASS`, 1 on `ASSERT` (printing the failing
-assertion id), 2 on timeout, 3 on a host/board problem. A timeout with no
-banner at all means the program never ran, so it re-flashes once before
-reporting. `diff-ab.js` exits nonzero on divergence and prints a unified diff of
+The hw backend (`tests/ab/backends/hw.js`) exits 0 on `HWAB PASS`, 1 on
+`ASSERT` (printing the failing assertion id), 2 on timeout, 3 on a host/board
+problem. A timeout with no banner at all means the program never ran, so it
+re-flashes once before reporting. `diff-ab.js` exits nonzero on divergence and prints a unified diff of
 the normalized lines; normalization drops what belongs to the capture rather
 than to the build -- a final line cut short when the capture stopped, and the
 previous program's output arriving out of DAPLink's buffer, which can include
@@ -164,7 +177,7 @@ previously flashed program -- including its PASS banner.
 
 On failure the generated `assert` prints `ASSERT <id>` and then panics 45. The
 host prelude's `assert` throws instead, and an uncaught throw on device is just
-panic 999, which does not say which assertion failed -- `gen-project.js`
+panic 999, which does not say which assertion failed -- generation
 rewrites the prelude's assert at generation time to get a legible failure. The
 rewrite is bracketed by `---- hw-ab generated replacement ----` comments in the
 generated `main.ts`.
@@ -246,7 +259,7 @@ assertion -- the case files raise exceptions deliberately in a few places, so a
 
 **Sad face with 521 right after flashing** -- DAPLink rejected the incoming
 hex (a flash-time checksum failure). The program never ran, so the capture
-times out with no banner, which is the case `run-capture.js` re-flashes once by
+times out with no banner, which is the case the hw backend re-flashes once by
 itself; it also prints `FAIL.TXT` from the MICROBIT drive when DAPLink left one
 there. Reaching the report means both attempts were rejected: unplug and replug
 the board before retrying.
@@ -290,11 +303,12 @@ reconfiguring it, or the device is not the micro:bit.
 **Build fails with `Package not installed: <something>`** -- the generated
 `pxt.json` stamps the current target version so pxt-microbit's upgrade rules do
 not inject extra dependencies. If the stamp is missing the project reads as
-version 0.0.0 and those rules fire. Regenerate with `gen-project.js`.
+version 0.0.0 and those rules fire. Regenerate with `node tests/ab/ab.js gen`.
 
 ## Platforms
 
-Only `run-capture.js` touches the hardware; it detects the platform itself.
+Only `tests/ab/backends/hw.js` touches the hardware; it detects the platform
+itself.
 Everything else is platform-independent node:
 
 | | macOS | Linux | Windows |

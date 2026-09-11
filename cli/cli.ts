@@ -3738,6 +3738,7 @@ enum BuildOption {
     Test,
     DebugSim,
     GenDocs,
+    JustBuildJs,
 }
 
 export function serviceAsync(parsed: commandParser.ParsedCommand) {
@@ -4992,6 +4993,7 @@ function prepBuildOptionsAsync(mode: BuildOption, quick = false, ignoreTests = f
                 case BuildOption.Run:
                 case BuildOption.DebugSim:
                 case BuildOption.GenDocs:
+                case BuildOption.JustBuildJs:
                     target.isNative = false
                     break
                 default:
@@ -5832,6 +5834,8 @@ export function buildAsync(parsed: commandParser.ParsedCommand) {
     let mode = BuildOption.JustBuild;
     if (parsed && parsed.flags["debug"])
         mode = BuildOption.DebugSim;
+    else if (parsed && parsed.flags["js"])
+        mode = BuildOption.JustBuildJs;
     else if (parsed && parsed.flags["deploy"])
         mode = BuildOption.Deploy;
     const clean = parsed && parsed.flags["clean"];
@@ -7387,6 +7391,7 @@ ${pxt.crowdin.KEY_VARIABLE} - crowdin key
                 aliases: ["hw"]
             },
             debug: { description: "Emit debug information with build" },
+            js: { description: "Build only the JavaScript the simulator runs: no native image, no run, no deploy" },
             deploy: { description: "Deploy to device if connected" },
             ignoreTests: { description: "Ignores tests in compilation", aliases: ["ignore-tests", "ignoretests", "it"] },
             clean: { description: "Clean before build" },

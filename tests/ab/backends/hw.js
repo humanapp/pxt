@@ -1,10 +1,16 @@
 /*
- * Flashes a hex to an attached micro:bit and captures its serial output.
+ * Capture backend "hw": flashes a hex to an attached micro:bit and captures its
+ * serial output.
  *
  * micro:bit boards speak USB-CDC through DAPLink. No pxt CLI command can attach
  * to that (pxt console / hidserial are HF2-only), so the capture is done by
  * setting the line discipline with the platform's own tool (stty / mode) and
  * reading the device directly.
+ *
+ * The other backend is backends/sim.js. Both take the built artifact and the
+ * stream file positionally and report the same exit codes -- 0 pass, 1 fail,
+ * 2 timeout, 3 the harness could not run anything -- which is what lets
+ * everything downstream be blind to which one produced the bytes.
  */
 
 "use strict";
@@ -18,7 +24,7 @@ const REMOUNT_WAIT = 60;    // seconds to wait for the board to come back after 
 const UNMOUNT_GRACE = 15;   // seconds to wait for the drive to go away while programming
 
 const USAGE = [
-    "Usage: node tests/hw-ab/run-capture.js <hex> <logfile> [--timeout <sec>]",
+    "Usage: node tests/ab/backends/hw.js <hex> <logfile> [--timeout <sec>]",
     "           [--soak <minutes>] [--expect <case>]",
     "",
     "Copies <hex> to the attached micro:bit, waits for it to re-enumerate, opens its",
@@ -53,7 +59,7 @@ const USAGE = [
     "override it:",
     "  MICROBIT_VOLUME  path or drive of the mounted MICROBIT drive",
     "  MICROBIT_SERIAL  serial device to read (/dev/cu.usbmodem1102, COM5, ...)",
-    "See the Platforms section of tests/hw-ab/README.md."
+    "See the Platforms section of tests/ab/README.md."
 ].join("\n");
 
 function usage(stream) {
@@ -145,7 +151,7 @@ if (platform === "darwin") {
     devDesc = "mbed/DAPLink/USB Serial COM port";
 } else {
     fail("unsupported platform '" + platform +
-        "' -- see the Platforms section of tests/hw-ab/README.md");
+        "' -- see the Platforms section of tests/ab/README.md");
 }
 
 function powershellLines(script) {

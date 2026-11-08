@@ -37,6 +37,7 @@ import {
     getSimxApiLevel as getSimxEditorApiLevel,
     hasEditorTab,
     SimxEditorSimulatorState,
+    SimxEditorTab,
 } from "../../pxtservices/simxeditor";
 import {
     addSimulatorThemeToFiles,
@@ -6536,8 +6537,10 @@ describe("session-only files", () => {
 describe("simulator extension editor tab open requests", () => {
     const EXT = "someorg/pxt-ext";
     const REF = "reforg/pxt-ref";
+    const EXT_TAB: SimxEditorTab = { key: EXT, label: "Ext" };
+    const REF_TAB: SimxEditorTab = { key: REF, label: "Ref", iconUrl: `https://sim.example/simx/${REF}/-/icon.svg` };
 
-    function answer(msg: object, tabs: string[], opened: string[] = [], shown = true) {
+    function answer(msg: object, tabs: SimxEditorTab[], opened: string[] = [], shown = true) {
         return answerSimxEditorRequest(EXT, { type: "simxeditor", id: "4", ...msg }, tabs, key => {
             opened.push(key);
             return shown;
@@ -6546,45 +6549,45 @@ describe("simulator extension editor tab open requests", () => {
 
     it("shows the tab and acknowledges the request", () => {
         const opened: string[] = [];
-        chai.expect(answer({ subtype: "open" }, [EXT], opened)).deep.equals({ type: "simxeditor", id: "4", subtype: "ack" });
+        chai.expect(answer({ subtype: "open" }, [EXT_TAB], opened)).deep.equals({ type: "simxeditor", id: "4", subtype: "ack" });
         chai.expect(opened).deep.equals([EXT]);
     });
 
     it("refuses with UNAVAILABLE when the editor offers no such tab here", () => {
-        chai.expect(answer({ subtype: "open" }, [EXT], [], false)).deep.include({ type: "simxeditor", id: "4", subtype: "error", code: "UNAVAILABLE" });
-        chai.expect(answer({ subtype: "open", key: REF }, [EXT, REF], [], false)).deep.include({ subtype: "error", code: "UNAVAILABLE" });
+        chai.expect(answer({ subtype: "open" }, [EXT_TAB], [], false)).deep.include({ type: "simxeditor", id: "4", subtype: "error", code: "UNAVAILABLE" });
+        chai.expect(answer({ subtype: "open", key: REF }, [EXT_TAB, REF_TAB], [], false)).deep.include({ subtype: "error", code: "UNAVAILABLE" });
     });
 
     it("refuses an unknown request with INVALID_REQUEST, showing nothing", () => {
-        const reply = answerSimxEditorRequest(EXT, { type: "simxeditor", subtype: "close", id: 5 }, [EXT], () => { throw new Error("opened"); });
+        const reply = answerSimxEditorRequest(EXT, { type: "simxeditor", subtype: "close", id: 5 }, [EXT_TAB], () => { throw new Error("opened"); });
         chai.expect(reply).deep.include({ type: "simxeditor", id: undefined, subtype: "error", code: "INVALID_REQUEST" });
     });
 
     it("refuses with INVALID_REQUEST, showing nothing, an open request whose key is not a string", () => {
         const opened: string[] = [];
-        chai.expect(answer({ subtype: "open", key: 7 }, [EXT, REF], opened)).deep.include({ type: "simxeditor", id: "4", subtype: "error", code: "INVALID_REQUEST" });
+        chai.expect(answer({ subtype: "open", key: 7 }, [EXT_TAB, REF_TAB], opened)).deep.include({ type: "simxeditor", id: "4", subtype: "error", code: "INVALID_REQUEST" });
         chai.expect(opened).deep.equals([]);
     });
 
     it("shows the tab an open request names, the frame's own or one talking to the frame", () => {
         const opened: string[] = [];
-        chai.expect(answer({ subtype: "open", key: EXT }, [EXT, REF], opened)).deep.equals({ type: "simxeditor", id: "4", subtype: "ack" });
-        chai.expect(answer({ subtype: "open", key: REF }, [EXT, REF], opened)).deep.equals({ type: "simxeditor", id: "4", subtype: "ack" });
-        chai.expect(answer({ subtype: "open" }, [EXT, REF], opened)).deep.equals({ type: "simxeditor", id: "4", subtype: "ack" });
+        chai.expect(answer({ subtype: "open", key: EXT }, [EXT_TAB, REF_TAB], opened)).deep.equals({ type: "simxeditor", id: "4", subtype: "ack" });
+        chai.expect(answer({ subtype: "open", key: REF }, [EXT_TAB, REF_TAB], opened)).deep.equals({ type: "simxeditor", id: "4", subtype: "ack" });
+        chai.expect(answer({ subtype: "open" }, [EXT_TAB, REF_TAB], opened)).deep.equals({ type: "simxeditor", id: "4", subtype: "ack" });
         chai.expect(opened).deep.equals([EXT, REF, EXT]);
     });
 
     it("refuses with PERMISSION_DENIED, showing nothing, an open request for a tab that does not talk to the frame", () => {
         const opened: string[] = [];
-        chai.expect(answer({ subtype: "open", key: "otherorg/pxt-other" }, [EXT, REF], opened)).deep.include({ type: "simxeditor", id: "4", subtype: "error", code: "PERMISSION_DENIED" });
-        chai.expect(answer({ subtype: "open" }, [REF], opened)).deep.include({ subtype: "error", code: "PERMISSION_DENIED" });
+        chai.expect(answer({ subtype: "open", key: "otherorg/pxt-other" }, [EXT_TAB, REF_TAB], opened)).deep.include({ type: "simxeditor", id: "4", subtype: "error", code: "PERMISSION_DENIED" });
+        chai.expect(answer({ subtype: "open" }, [REF_TAB], opened)).deep.include({ subtype: "error", code: "PERMISSION_DENIED" });
         chai.expect(opened).deep.equals([]);
     });
 
     it("answers a tabs request with the tabs that talk to the frame, possibly none, showing nothing", () => {
         const opened: string[] = [];
-        chai.expect(answer({ subtype: "tabs" }, [EXT, REF], opened)).deep.equals({ type: "simxeditor", id: "4", subtype: "tabs", keys: [EXT, REF] });
-        chai.expect(answer({ subtype: "tabs" }, [], opened)).deep.equals({ type: "simxeditor", id: "4", subtype: "tabs", keys: [] });
+        chai.expect(answer({ subtype: "tabs" }, [EXT_TAB, REF_TAB], opened)).deep.equals({ type: "simxeditor", id: "4", subtype: "tabs", tabs: [EXT_TAB, REF_TAB] });
+        chai.expect(answer({ subtype: "tabs" }, [], opened)).deep.equals({ type: "simxeditor", id: "4", subtype: "tabs", tabs: [] });
         chai.expect(opened).deep.equals([]);
     });
 });
@@ -6600,8 +6603,8 @@ describe("simulator extension shared simulator frames", () => {
     }
 
     // a registration as the driver resolves one whose tab talks to the simulator frame of `simulatorKey`
-    function tab(key: string, simulatorKey = key): SimxEditorRegistration {
-        return { key, label: key, url: `https://sim.example/simx/${key}/-/index.html`, simulatorKey };
+    function tab(key: string, simulatorKey = key, extra: Partial<SimxEditorRegistration> = {}): SimxEditorRegistration {
+        return { key, label: key, url: `https://sim.example/simx/${key}/-/index.html`, simulatorKey, ...extra };
     }
 
     describe("dependencies", () => {
@@ -6710,17 +6713,33 @@ describe("simulator extension shared simulator frames", () => {
     });
 
     describe("the tabs a simulator frame talks to", () => {
+        const keys = (registrations: SimxEditorRegistration[], key: string) => getSimxFrameTabs(registrations, key).map(t => t.key);
+
         it("lists the frame's own tab first, then the tabs of the registrations naming it, in registration order", () => {
             const registrations = [tab(REF, EXT), tab("otherorg/pxt-other"), tab(EXT), tab(MID, EXT)];
-            chai.expect(getSimxFrameTabs(registrations, EXT)).deep.equals([EXT, REF, MID]);
-            chai.expect(getSimxFrameTabs(registrations, "otherorg/pxt-other")).deep.equals(["otherorg/pxt-other"]);
+            chai.expect(keys(registrations, EXT)).deep.equals([EXT, REF, MID]);
+            chai.expect(keys(registrations, "otherorg/pxt-other")).deep.equals(["otherorg/pxt-other"]);
         });
 
         it("lists only the tabs naming a frame whose registration has no tab of its own, and none for a frame no tab talks to", () => {
             const registrations = [tab(REF, EXT), tab(MID, EXT)];
-            chai.expect(getSimxFrameTabs(registrations, EXT)).deep.equals([REF, MID]);
-            chai.expect(getSimxFrameTabs(registrations, REF)).deep.equals([]);
-            chai.expect(getSimxFrameTabs([], EXT)).deep.equals([]);
+            chai.expect(keys(registrations, EXT)).deep.equals([REF, MID]);
+            chai.expect(keys(registrations, REF)).deep.equals([]);
+            chai.expect(keys([], EXT)).deep.equals([]);
+        });
+
+        it("carries each tab's label, and its icon's URL only for an SVG icon", () => {
+            const iconUrl = `https://sim.example/simx/${REF}/-/icon.svg`;
+            const registrations = [
+                tab(EXT, EXT, { label: "Ext" }),
+                tab(REF, EXT, { label: "Ref", iconUrl }),
+                tab(MID, EXT, { label: "Mid", icon: "xicon js" }),
+            ];
+            chai.expect(getSimxFrameTabs(registrations, EXT)).deep.equals([
+                { key: EXT, label: "Ext" },
+                { key: REF, label: "Ref", iconUrl },
+                { key: MID, label: "Mid" },
+            ]);
         });
     });
 });

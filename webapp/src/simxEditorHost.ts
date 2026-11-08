@@ -10,6 +10,7 @@ import {
     SimxEditorReply,
     SimxEditorSimulatorCommand,
     SimxEditorSimulatorState,
+    SimxEditorTab,
 } from "../../pxtservices/simxeditor";
 import { errorReply, getSimxExtension, getSimxRepository, requestId } from "./simxRequests";
 
@@ -327,14 +328,20 @@ export function getProjectSimxEditors(
 }
 
 /**
- * Returns the keys of the tabs among `registrations` that talk to the simulator
- * frame of `key`, those whose `simulatorKey` is `key`: the frame's own tab
- * first, if it is among them, then the others in the order of `registrations`.
+ * Returns the tabs among `registrations` that talk to the simulator frame of
+ * `key`, those whose `simulatorKey` is `key`, each with its key, its label and,
+ * for an SVG icon, its icon's URL: the frame's own tab first, if it is among
+ * them, then the others in the order of `registrations`.
  * @param registrations the tabs the editor offers the open project, in registration order
  */
-export function getSimxFrameTabs(registrations: SimxEditorRegistration[], key: string): string[] {
-    const keys = registrations.filter(r => r.simulatorKey === key).map(r => r.key);
-    return keys.indexOf(key) > 0 ? [key].concat(keys.filter(k => k !== key)) : keys;
+export function getSimxFrameTabs(registrations: SimxEditorRegistration[], key: string): SimxEditorTab[] {
+    const tabs = registrations.filter(r => r.simulatorKey === key).map(r => {
+        const tab: SimxEditorTab = { key: r.key, label: r.label };
+        if (r.iconUrl) tab.iconUrl = r.iconUrl;
+        return tab;
+    });
+    const own = tabs.findIndex(t => t.key === key);
+    return own > 0 ? [tabs[own]].concat(tabs.filter(t => t.key !== key)) : tabs;
 }
 
 /**
@@ -358,22 +365,22 @@ export function getSimxEditorKeyOfMarker(name: string, registrations: SimxEditor
  * let it through. A tabs request is answered with `tabs`. An open request shows
  * the tab its `key` names, or the frame's own when it names none, and is
  * refused with `INVALID_REQUEST` when its `key` is present but not a string,
- * and with `PERMISSION_DENIED` when that tab is not among `tabs`.
- * @param tabs the keys of the tabs that talk to the frame, as {@link getSimxFrameTabs} lists them
+ * and with `PERMISSION_DENIED` when no tab of `tabs` has that key.
+ * @param tabs the tabs that talk to the frame, as {@link getSimxFrameTabs} lists them
  * @param open shows the tab of the given key; returns false, showing nothing, if the editor offers no such tab here
  */
-export function answerSimxEditorRequest(key: string, msg: unknown, tabs: string[], open: (key: string) => boolean): SimxEditorReply {
+export function answerSimxEditorRequest(key: string, msg: unknown, tabs: SimxEditorTab[], open: (key: string) => boolean): SimxEditorReply {
     const subtype = (msg as { subtype?: unknown })?.subtype;
     const id = requestId(msg);
     if (subtype === "tabs")
-        return { type: SIMXEDITOR_MESSAGE_TYPE, id, subtype: "tabs", keys: tabs.slice() };
+        return { type: SIMXEDITOR_MESSAGE_TYPE, id, subtype: "tabs", tabs: tabs.map(t => ({ ...t })) };
     if (subtype !== "open")
         return errorReply(SIMXEDITOR_MESSAGE_TYPE, id, "INVALID_REQUEST", `Unknown request ${subtype}.`);
     const requested = (msg as { key?: unknown }).key;
     if (requested !== undefined && typeof requested !== "string")
         return errorReply(SIMXEDITOR_MESSAGE_TYPE, id, "INVALID_REQUEST", "The key must be a string.");
     const tabKey = requested === undefined ? key : requested;
-    if (tabs.indexOf(tabKey) < 0)
+    if (!tabs.some(t => t.key === tabKey))
         return errorReply(SIMXEDITOR_MESSAGE_TYPE, id, "PERMISSION_DENIED", "The simulator frame does not serve that tab.");
     if (!open(tabKey))
         return errorReply(SIMXEDITOR_MESSAGE_TYPE, id, "UNAVAILABLE", "The editor does not offer this extension's tab here.");
@@ -413,7 +420,7 @@ export interface SimxEditorHostOptions {
 }
 
 /** A tab frame, with what the host knows of it. */
-interface SimxEditorTab {
+interface SimxEditorTabFrame {
     key: string;
     // the key of the simulator frame the tab talks to
     simulatorKey: string;
@@ -435,7 +442,7 @@ interface SimxEditorTab {
  * tab until it is ready.
  */
 export class SimxEditorHost {
-    protected tabs: pxt.Map<SimxEditorTab> = {};
+    protected tabs: pxt.Map<SimxEditorTabFrame> = {};
     // per key: the simulator frame that last finished loading
     protected simulatorFrames: pxt.Map<HTMLIFrameElement> = {};
     // the key of the shown tab, or undefined while none is shown

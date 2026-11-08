@@ -206,7 +206,7 @@ export interface SimxEditorOpenRequest {
     subtype: "open";
     id: string;
     /**
-     * The key of the tab to show, one of those the tabs request lists; the
+     * The key of the tab to show, one of the tabs the tabs request lists; the
      * simulator frame's own key when absent.
      */
     key?: string;
@@ -233,7 +233,7 @@ export type SimxEditorErrorCode =
     /**
      * No registration declares and enables an editor tab that talks to the
      * requesting simulator frame, or the tab an open request names (the frame's
-     * own when it names none) is not one of the keys the tabs request lists.
+     * own when it names none) is not one of the tabs the tabs request lists.
      */
     | "PERMISSION_DENIED"
     /** The editor shows no extension tabs in its current view, such as an embedded, read-only or tutorial view. */
@@ -248,20 +248,37 @@ export interface SimxEditorAckReply {
     subtype: "ack";
 }
 
+/** A tab that a tabs reply lists. */
+export interface SimxEditorTab {
+    /** The key of the tab's extension, e.g. `owner/repo`; the `key` an open request names to show it. */
+    key: string;
+    /**
+     * The tab's name as the editor toggle shows it, in the user's language: its
+     * registration's `editor.label`, or its key when the label holds no name.
+     */
+    label: string;
+    /**
+     * The URL of the tab's SVG icon, when its registration's `editor.icon` is
+     * a path; absent when the icon is MakeCode font-icon class names, or there
+     * is none.
+     */
+    iconUrl?: string;
+}
+
 /** The reply to a tabs request. */
 export interface SimxEditorTabsReply {
     type: typeof SIMXEDITOR_MESSAGE_TYPE;
     id: string;
     subtype: "tabs";
     /**
-     * The keys of the tabs the editor offers the open project that talk to the
-     * requesting simulator frame: the frame's own first, when its registration
-     * declares one, then those of the registrations naming the frame in
-     * `simulator`, in registration order; empty when the project includes none.
-     * The list is the same in every view, so an open request for one of them
-     * may still be answered with `UNAVAILABLE`.
+     * The tabs the editor offers the open project that talk to the requesting
+     * simulator frame: the frame's own first, when its registration declares
+     * one, then those of the registrations naming the frame in `simulator`, in
+     * registration order; empty when the project includes none. The list is
+     * the same in every view, so an open request for one of them may still be
+     * answered with `UNAVAILABLE`.
      */
-    keys: string[];
+    tabs: SimxEditorTab[];
 }
 
 /** The reply to a request the editor refused. */

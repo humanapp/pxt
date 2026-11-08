@@ -17,6 +17,7 @@ A simulator extension (simx) is a static web application that complements a trad
 Beyond showing its own UI beside the simulator, a simulator extension can, when its registration grants it:
 
 * contribute an **editor tab**, a page shown in the editor area and listed in the language dropdown beside JavaScript and Python, with the simulator still visible;
+* share another extension's **simulator frame** from its own editor tab;
 * read and write **project files** in its own folder of the project, so what it authors is saved with the project;
 * read the project's **assets** (images, tiles, tilemaps, animations, songs and JSON files) and hear when they change;
 * compile the project and receive the **program** the simulator runs.

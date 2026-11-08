@@ -51,13 +51,14 @@ The fields of the `simx` entry:
 | `allowFileWrite` | Lets the frame list, read, write and delete files in its folder of the project (see [Project files](#project-files)). | `false` | both |
 | `allowAssetRead` | Lets the frame list the project's assets, name, palette and simulator theme, and hear when they change (see [Project assets](#project-assets)). | `false` | both |
 | `allowProgramRead` | Lets the frame compile the open project and receive the program the simulator runs (see [Compiled program](#compiled-program)). | `false` | both |
-| `allowEditorTab` | Enables the editor tab that `editor` declares (see [Editor tab](#editor-tab)). | `false` | tab frame, and the simulator frame's request to open it |
+| `allowEditorTab` | Enables the editor tab that `editor` declares (see [Editor tab](#editor-tab)). | `false` | tab frame, and the simulator frame's requests to list and open its tabs |
 | `editor` | Declares the extension's editor tab: its page, label (text, or a map by language) and icon, and the types whose instances it creates. | none | tab frame |
 | `hideInFullscreen` | Hides the simulator frame while the editor is in fullscreen-simulator mode; it stays loaded and keeps messaging. | `false` | simulator frame |
+| `simulator` | The key of another registration whose simulator frame the extension's editor tab talks to, in place of a simulator frame of its own (see [Sharing another extension's simulator frame](#sharing-another-extensions-simulator-frame)). | none | tab frame |
 
 ### The extensions a project includes
 
-The open project includes a registered extension when one of its dependencies, direct or not, is that extension: a `github:` dependency whose full name, `owner/repo` or `owner/repo/path`, equals the key, compared ignoring case. A dependency on another extension of the same repository does not include it. While the project includes an extension, the editor serves the requests of its frames and offers its [editor tab](#editor-tab).
+The open project includes a registered extension when one of its dependencies, direct or not, is that extension: a `github:` dependency whose full name, `owner/repo` or `owner/repo/path`, equals the key, compared ignoring case. A dependency on another extension of the same repository does not include it. An extension whose registration names another's simulator frame is included only while it also depends on that other extension (see [Sharing another extension's simulator frame](#sharing-another-extensions-simulator-frame)). While the project includes an extension, the editor serves the requests of its frames and offers its [editor tab](#editor-tab).
 
 ### Grants and trust
 
@@ -120,6 +121,7 @@ The `apiLevel` URL parameter of the simulator frame and the tab frame names the 
 | Level | What it covers |
 | --- | --- |
 | 1 | The `projfs`, `projassets`, `projprogram` and `simxeditor` APIs as this page describes them: their requests, replies, events and asset kinds, and the registration fields. |
+| 2 | The `simulator` registration field, `peer` on the port message, `key` on the open request, the `tabs` request. |
 
 ## Project files
 
@@ -265,22 +267,54 @@ The tab is declared in the extension's `simx` entry (see [Registration](#registr
 * An SVG icon is drawn as a mask in the toggle's text color: only its shape is used, so it follows the editor's color themes, high contrast included. A square SVG drawn in a single color, such as `currentColor`, is recommended.
 * `editor.creates` is an optional list of the fully qualified names of fixed-instance types whose instances the tab creates, such as `myext.Thing`. The dropdown of a block parameter of such a type, which lists the instances the project declares, then ends with a "New ..." entry naming the type by its `block` attribute, else by its name in lower case, while the editor offers the tab. Picking the entry leaves the parameter as it was, shows the tab, and posts it the [`action` event](#lifecycle-events) asking it to create an instance, typically by writing the project file that declares it. The dropdown also offers an "Edit ..." entry naming the current instance when a file in the extension's folder declares it: picking it shows the tab and posts it the `action` event asking it to open the instance. A parameter that names its own `fieldEditor` gets no entry. The editor honors a claim only on a type declared by a package of the extension's own repository (the repository its key names, whatever subfolder), and ignores, and logs, any other; of two registrations the project includes that claim one type, the first in registration order creates its instances and the other is logged.
 * `allowEditorTab` enables the tab. The editor offers no tab unless the registration sets both `editor`, with its `index`, and `allowEditorTab`; it logs a registration that sets `allowEditorTab` without them.
-* A registration with an editor tab must be `permanent` (the default); the editor ignores, and logs, an `editor` on a registration with `permanent: false`.
+* A registration with an editor tab must be `permanent` (the default); the editor ignores, and logs, an `editor` on a registration with `permanent: false`. A tab that shares another extension's simulator frame needs that extension's registration to be permanent instead (see [Sharing another extension's simulator frame](#sharing-another-extensions-simulator-frame)).
 
 ### Two frames
 
-An extension with an editor tab has two frames, both created for its key:
+An extension with an editor tab has two frames, both created for its key, unless it [shares another extension's simulator frame](#sharing-another-extensions-simulator-frame):
 
 * Its **simulator frame**, in the simulator column, is [the simulator frame](#the-simulator-frame) described above. Its URL also carries `editor=1` when the open project includes the extension, so the frame knows at startup that the tab exists.
 * Its **tab frame**, in the editor area, is created the first time the tab is opened and removed when the project closes or reloads. Its URL carries the same parameters as the simulator frame's plus `role=editor`, and it gets the same sandbox and permissions under the same grants: it may send [project-file](#project-files), [project-asset](#project-assets) and [compiled-program](#compiled-program) requests just as the simulator frame may, in the same folder and under the same limits. It is not a simulator frame: it receives no simulator messages, and nothing it posts is relayed to the simulator. The editor-wide messages any frame may post, such as `screenshot` and `addextensions`, are handled from it as from a simulator frame.
 
-Whenever the editor shows the tab and the extension's simulator frame does not exist (for example, because the program has not run), the editor creates it. It also creates it again after the simulator unloads while the tab exists, as when the simulator theme picker closes.
+Whenever the editor shows the tab and the simulator frame it talks to does not exist (for example, because the program has not run), the editor creates it. It also creates it again after the simulator unloads while the tab exists, as when the simulator theme picker closes.
+
+### Sharing another extension's simulator frame
+
+An extension's registration may name another registered extension's simulator frame as its own, with `"simulator": "<key>"` in its `simx` entry, where `<key>` is the other registration's key in `approvedRepoLib`:
+
+```json
+"approvedRepoLib": {
+    "owner/repo": {
+        "simx": {
+            "sha": "1a2b3c4d5e6f7a8b9c0d1e2f3a4b5c6d7e8f9a0b",
+            "index": "simx/index.html"
+        }
+    },
+    "owner/repo-designer": {
+        "simx": {
+            "sha": "0f9e8d7c6b5a4f3e2d1c0b9a8f7e6d5c4b3a2f1e",
+            "simulator": "owner/repo",
+            "editor": {
+                "index": "index.html",
+                "label": "Designer"
+            },
+            "allowEditorTab": true
+        }
+    }
+}
+```
+
+* The extension then has no simulator frame of its own: its tab frame talks, over the [port](#ready-and-the-port) the editor brokers, to the other registration's simulator frame, which the editor creates when it shows the tab. The other registration's `index`, `aspectRatio`, `permanent` and `hideInFullscreen` govern that frame, and the extension's own are ignored. No simulator message creates a frame for the extension's key.
+* The extension keeps its own key for everything else: its tab frame's page, label and icon, from its own published files; the grants its tab frame's requests are served under; its [folder](#the-extensions-folder) of the project; and its `editor.creates` claims.
+* The registration must declare `editor`, with its `index`, and set `allowEditorTab`, and the other registration must have a simulator frame, be permanent and set no `simulator` itself. The editor offers no tab, and logs it, for a registration that breaks one of these or names its own key.
+* The editor honors the reference only while the extension depends, directly or through other extensions, on the other one in the open project. When the project includes the extension without that dependency, the editor logs it, offers no tab, and refuses the requests of the extension's frames with `UNREGISTERED`, as for an extension the project does not include.
+* A simulator frame may so talk to several tabs: its own, when its registration declares one, and the tab of every registration naming it. Each tab gets a port pair of its own, and the editor creates the frame whenever it shows any of them. The frame can list those tabs and open any of them (see [Opening the tab from the simulator frame](#opening-the-tab-from-the-simulator-frame)). The `editor=1` parameter of the frame's URL reflects only its own tab: a frame whose tabs all belong to registrations naming it gets no `editor=1`, and learns of those tabs through the `tabs` request, at API level 2 or above.
 
 ### Ready, and the port
 
 The editor shows a loading indicator, labeled with the tab's label, over the tab until the tab frame posts `{ type: "simxeditor", event: "ready" }` to its parent. Post it once the page listens for messages.
 
-Once the tab is ready and the simulator frame has loaded, the editor creates a `MessageChannel` and posts `{ type: "simxeditorport", key }` to each frame, with one of the channel's ports in the event's `ports[0]`. The two frames talk over that channel; the editor never reads it. The editor brokers a new pair whenever a new simulator frame of the extension loads, as when the editor creates it again after the simulator unloads, so both frames should accept a new port at any time. Either side may close its port.
+Once the tab is ready and the simulator frame it talks to has loaded, the editor creates a `MessageChannel` and posts `{ type: "simxeditorport", key, peer }` to each frame, with one of the channel's ports in the event's `ports[0]`. `key` is the receiving frame's own key (the tab's key to the tab frame, the simulator frame's key to the simulator frame) and `peer` the key of the frame at the other end; for a tab talking to its own extension's simulator frame, both are the extension's key. The two frames talk over that channel; the editor never reads it. Whenever a simulator frame loads, as when the editor creates it again after the simulator unloads, the editor brokers a new pair between it and every ready tab that talks to it, so both frames should accept a new port at any time, and a simulator frame that several tabs talk to holds one port per tab, told apart by `peer`. Either side may close its port.
 
 ### Lifecycle events
 
@@ -298,7 +332,11 @@ A hidden tab stays loaded, but it is not rendered, and the browser may run its t
 
 ### Opening the tab from the simulator frame
 
-The simulator frame may ask the editor to show the tab, for example when the user clicks a button in it, by posting `{ type: "simxeditor", subtype: "open", id }` to its parent. The editor shows the tab, creating the tab frame if needed, and replies to the simulator frame with `{ type: "simxeditor", id, subtype: "ack" }`, or with an error whose `code` is one of the [shared codes](#talking-to-the-editor) or `UNAVAILABLE` (the editor shows no tabs in its current view). Here `UNREGISTERED` means the frame is not the simulator frame of a registered extension the open project includes, `PERMISSION_DENIED` that the registration does not declare and enable a tab, and `INVALID_REQUEST` that the request is unknown or the editor failed to carry it out.
+The simulator frame may ask the editor to show one of the tabs that talk to it, for example when the user clicks a button in it, by posting `{ type: "simxeditor", subtype: "open", id, key }` to its parent, where `key` is the tab's key; without `key`, the frame's own tab. The editor shows the tab, creating its tab frame if needed, and replies to the simulator frame with `{ type: "simxeditor", id, subtype: "ack" }`, or with an error whose `code` is one of the [shared codes](#talking-to-the-editor) or `UNAVAILABLE` (the editor shows no tabs in its current view). Here `UNREGISTERED` means the frame is not the simulator frame of a registered extension the open project includes, `PERMISSION_DENIED` that no tab the editor serves talks to the frame or that the tab requested is not one of the keys the `tabs` request lists, and `INVALID_REQUEST` that the request is unknown, malformed, or the editor failed to carry it out.
+
+The simulator frame may also ask which tabs talk to it by posting `{ type: "simxeditor", subtype: "tabs", id }`. The editor replies with `{ type: "simxeditor", id, subtype: "tabs", keys }`, where `keys` holds the keys of the tabs the editor offers the open project that talk to the frame: the frame's own first, when its registration declares one, then those of the registrations naming the frame in `simulator`, in registration order; it may be empty. The list is the same in every view, so an open request for one of them may still be answered with `UNAVAILABLE`.
+
+Only a simulator frame that a tab the editor serves talks to may send these requests: one whose registration declares and enables a tab, or one another registration's tab names. Others are answered with `PERMISSION_DENIED`, and the requests of a tab frame with `UNREGISTERED`.
 
 ## Encodings
 

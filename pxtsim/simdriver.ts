@@ -34,6 +34,28 @@ namespace pxsim {
         return "The simulator extension's registration declares no editor tab the editor can serve.";
     }
 
+    /**
+     * Returns why the driver serves no editor tab for `registration`, registered under
+     * `key`, which names another registration's simulator frame in `simulator`; undefined
+     * if it serves one. Call once every registration that names none is resolved.
+     * @param registrations every registration, by key
+     */
+    function simulatorReferenceRefusal(key: string, registration: SimulatorDriverOptions["simulatorExtensions"][string], registrations: SimulatorDriverOptions["simulatorExtensions"]): string | undefined {
+        const simulatorKey = registration.simulator;
+        const referenced = registrations[simulatorKey];
+        if (simulatorKey === key)
+            return "its registration names its own simulator frame";
+        if (referenced?.simulator)
+            return `its registration names the simulator frame of ${simulatorKey}, whose registration names another's`;
+        if (!referenced?.url)
+            return `its registration names the simulator frame of ${simulatorKey}, which no usable registration provides`;
+        if (!referenced.permanent)
+            return `its registration names the simulator frame of ${simulatorKey}, which is not permanent, as an editor tab needs`;
+        if (!registration.allowEditorTab || !registration.editor?.index)
+            return "its registration names another's simulator frame without an editor with an index and allowEditorTab";
+        return undefined;
+    }
+
     /** A frame that sent a simulator extension request, with the `simulatorExtensions` key it was created for. */
     interface ExtensionRequester {
         frame: HTMLIFrameElement;
@@ -116,11 +138,17 @@ namespace pxsim {
             };
             allowEditorTab?: boolean;
             hideInFullscreen?: boolean;
+            simulator?: string;
             // Additional fields outside of pxt.SimulatorExtensionConfig
-            url?: string; // Computed URL
+            url?: string; // Computed URL; never set for a registration that sets `simulator`
             // Computed URL of the editor tab's page; set only for a registration that declares
-            // `editor` (with an index), sets `allowEditorTab` and is permanent
+            // `editor` (with an index) and sets `allowEditorTab`, and either is permanent or
+            // names in `simulator` a registration the driver accepts the reference to: one with
+            // a simulator frame, permanent and naming no other in its own `simulator`
             editorUrl?: string;
+            // The key of the registration whose simulator frame the editor tab talks to: the
+            // registration's own key, or the one its `simulator` names; set only beside `editorUrl`
+            simulatorKey?: string;
             // Computed URL of the editor tab's SVG icon; set only beside `editorUrl`, when `editor.icon` is a path
             // (see `isSimxIconPath`)
             iconUrl?: string;
@@ -165,7 +193,8 @@ namespace pxsim {
         onProjprogramMessage?: (key: string, msg: SimulatorMessage, reply: (msg: SimulatorMessage) => void) => void;
         /**
          * Receives the editor-tab ("simxeditor") requests of simulator extension frames
-         * whose registration declares and enables an editor tab (see `editorUrl`).
+         * whose registration declares and enables an editor tab (see `editorUrl`), or whose
+         * frame another registration's editor tab talks to (see `simulatorKey`).
          * @param key the `simulatorExtensions` key the requesting frame was created for
          * @param msg the request, as received
          * @param reply posts a message to the requesting frame only
@@ -326,12 +355,14 @@ namespace pxsim {
      * simulator extension frame and tab frame in the `apiLevel` URL parameter.
      * Level 1 is the `projfs`, `projassets`, `projprogram` and `simxeditor` message
      * families, with their requests, replies, events and asset kinds, and the fields
-     * of a simulator extension's registration. The level goes up by one whenever a
-     * change adds to or alters what a frame can observe of this surface: a
-     * family, a request, an event, an asset kind or a field. A frame URL without
-     * the parameter comes from an editor older than level 1.
+     * of a simulator extension's registration. Level 2 adds the `simulator`
+     * registration field, `peer` on the `simxeditorport` message, `key` on the
+     * `simxeditor` open request, and the `simxeditor` tabs request. The level goes up
+     * by one whenever a change adds to or alters what a frame can observe of this
+     * surface: a family, a request, an event, an asset kind or a field. A frame URL
+     * without the parameter comes from an editor older than level 1.
      */
-    export const SIMX_API_LEVEL = 1;
+    export const SIMX_API_LEVEL = 2;
 
     /** The inputs {@link simxFrameUrl} builds a simulator extension frame or tab frame URL from. */
     export interface SimxFrameUrlParams {
@@ -427,14 +458,40 @@ namespace pxsim {
 
             // Preprocess simulator extensions
             const simXDevMode = U.isLocalHost() && /[?&]simxdev(?:[=&#]|$)/i.test(window.location.href);
-            Object.entries(options?.simulatorExtensions || {}).forEach(([key, simx]) => {
-                // The computed fields hold only what this pass resolves
+            const simulatorExtensions = options?.simulatorExtensions || {};
+            // Compute the effective URL of a resource of the artifact of the extension registered under `key`
+            const resolve = (key: string, simx: SimulatorDriverOptions["simulatorExtensions"][string], resource: string) => {
+                if (simXDevMode && simx.devUrl) {
+                    // Use the dev URL if the dev flag is set (and we're on localhost)
+                    return new URL(resource, simx.devUrl).toString();
+                }
+                const simUrl = this.getSimUrl();
+                // Construct the path. The "-" element delineates the extension key from the resource name.
+                const simxPath = ["simx", key, "-", resource].join("/");
+                // Create the fully-qualified URL, preserving the origin by removing all leading slashes
+                return new URL(simxPath.replace(/^\/+/, ""), simUrl.origin).toString();
+            };
+            // Resolve the editor tab of the registration under `key`, whose page talks to the simulator frame of `simulatorKey`
+            const resolveEditorTab = (key: string, simx: SimulatorDriverOptions["simulatorExtensions"][string], simulatorKey: string) => {
+                simx.editorUrl = resolve(key, simx, simx.editor.index);
+                if (isSimxIconPath(simx.editor.icon))
+                    simx.iconUrl = resolve(key, simx, simx.editor.icon);
+                if (Array.isArray(simx.editor.creates))
+                    simx.creates = simx.editor.creates;
+                simx.simulatorKey = simulatorKey;
+                this._allowedOrigins.push(new URL(simx.editorUrl).origin);
+            };
+            Object.entries(simulatorExtensions).forEach(([key, simx]) => {
+                // The computed fields hold only what these passes resolve
                 if (simx) {
                     delete simx.url;
                     delete simx.editorUrl;
                     delete simx.iconUrl;
                     delete simx.creates;
+                    delete simx.simulatorKey;
                 }
+                // A registration naming another's simulator frame is resolved in the pass below
+                if (simx?.simulator) return;
                 // Verify essential `simx` config was provided
                 if (
                     !simx ||
@@ -444,19 +501,7 @@ namespace pxsim {
                 ) {
                     return;
                 }
-                // Compute the effective URL of a resource of the extension's artifact
-                const resolve = (resource: string) => {
-                    if (simXDevMode && simx.devUrl) {
-                        // Use the dev URL if the dev flag is set (and we're on localhost)
-                        return new URL(resource, simx.devUrl).toString();
-                    }
-                    const simUrl = this.getSimUrl();
-                    // Construct the path. The "-" element delineates the extension key from the resource name.
-                    const simxPath = ["simx", key, "-", resource].join("/");
-                    // Create the fully-qualified URL, preserving the origin by removing all leading slashes
-                    return new URL(simxPath.replace(/^\/+/, ""), simUrl.origin).toString();
-                };
-                simx.url = resolve(simx.index);
+                simx.url = resolve(key, simx, simx.index);
 
                 // Add the origin to the allowed origins
                 this._allowedOrigins.push(new URL(simx.url).origin);
@@ -467,14 +512,18 @@ namespace pxsim {
                     } else if (!simx.permanent) {
                         pxsim.error(`simulator extension ${key}: an editor tab needs a permanent registration; ignoring its editor`);
                     } else {
-                        simx.editorUrl = resolve(simx.editor.index);
-                        if (isSimxIconPath(simx.editor.icon))
-                            simx.iconUrl = resolve(simx.editor.icon);
-                        if (Array.isArray(simx.editor.creates))
-                            simx.creates = simx.editor.creates;
-                        this._allowedOrigins.push(new URL(simx.editorUrl).origin);
+                        resolveEditorTab(key, simx, key);
                     }
                 }
+            });
+            // Resolve the registrations naming another's simulator frame, which get no frame of their own
+            Object.entries(simulatorExtensions).forEach(([key, simx]) => {
+                if (!simx?.simulator) return;
+                const refusal = simulatorReferenceRefusal(key, simx, simulatorExtensions);
+                if (refusal)
+                    pxsim.error(`simulator extension ${key}: ${refusal}; offering no editor tab`);
+                else
+                    resolveEditorTab(key, simx, simx.simulator);
             });
 
             this._allowedOrigins = U.unique(this._allowedOrigins, f => f);
@@ -801,7 +850,8 @@ namespace pxsim {
          * current run, if there is one. A frame created without a run gets the run
          * message on the first message of a later run on the extension's channel.
          * @param key the `simulatorExtensions` key
-         * @returns the frame, or undefined if no usable extension is registered under `key`
+         * @returns the frame, or undefined if no usable extension is registered under `key`, or
+         * its registration names another's simulator frame (`simulator`)
          */
         public startSimulatorExtension(key: string): HTMLIFrameElement | undefined {
             const simulatorExtension = this.options.simulatorExtensions?.[key];
@@ -1427,6 +1477,12 @@ namespace pxsim {
             return !this.options.isSimxInProject || this.options.isSimxInProject(key);
         }
 
+        /** Returns true if some registration's editor tab talks to the simulator frame of `key`: its resolved `simulatorKey` is `key`. */
+        private isTabSimulatorFrame(key: string): boolean {
+            const simulatorExtensions = this.options.simulatorExtensions || {};
+            return Object.keys(simulatorExtensions).some(k => simulatorExtensions[k]?.simulatorKey === key);
+        }
+
         /**
          * Returns the handler of the project-file, project-asset, compiled-program or
          * editor-tab request `type`, the registration flag a frame needs for it, and the
@@ -1452,7 +1508,9 @@ namespace pxsim {
          * - `PERMISSION_DENIED`: the registration does not set the request's flag
          *   (`allowFileWrite`, `allowAssetRead`, `allowProgramRead` or `allowEditorTab`),
          *   or, for an editor-tab request, declares no editor tab the driver can serve
-         *   (one it computed `editorUrl` for);
+         *   (one it computed `editorUrl` for); an editor-tab request from a simulator frame
+         *   whose key some registration's `simulatorKey` names passes this check whatever
+         *   the frame's registration sets;
          * - the request family's failure code (`FAILED`, or `INVALID_REQUEST` for an
          *   editor-tab request): the handler throws.
          * Errors carry the request's type and id. Requests from windows that are
@@ -1493,11 +1551,13 @@ namespace pxsim {
                 refuse("UNREGISTERED", "The open project does not use this simulator extension.");
                 return;
             }
-            const denied = !registration[permission]
-                ? `The simulator extension's registration does not set ${permission}.`
-                : permission === "allowEditorTab" && !registration.editorUrl
-                    ? editorTabRefusal(registration)
-                    : undefined;
+            const denied = permission === "allowEditorTab" && this.isTabSimulatorFrame(key)
+                ? undefined
+                : !registration[permission]
+                    ? `The simulator extension's registration does not set ${permission}.`
+                    : permission === "allowEditorTab" && !registration.editorUrl
+                        ? editorTabRefusal(registration)
+                        : undefined;
             if (denied) {
                 refuse("PERMISSION_DENIED", denied);
                 return;

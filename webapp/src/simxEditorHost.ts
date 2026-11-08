@@ -17,12 +17,14 @@ import { errorReply, getSimxExtension, getSimxRepository, requestId } from "./si
 // offer a tab to the open project, the tab frames (one per registration,
 // created on first selection, hidden across editor switches, removed when the
 // project closes or reloads), their lifecycle events, and the MessageChannel
-// the editor brokers between a tab frame and the simulator frame of the same key.
+// the editor brokers between a tab frame and the simulator frame it talks to:
+// that of its own key, or the one its registration's `simulator` names.
 
 /** The fields of a simulator extension registration, as the simulator driver resolved them, that its editor tab uses. */
 export interface SimxEditorRegistrationConfig {
     editor?: { label?: string | pxt.Map<string>; icon?: string };
     editorUrl?: string;
+    simulatorKey?: string;
     iconUrl?: string;
     creates?: string[];
     allowPopups?: boolean;
@@ -52,6 +54,11 @@ export interface SimxEditorRegistration {
     iconUrl?: string;
     /** The URL of the tab's page, without the parameters the editor adds. */
     url: string;
+    /**
+     * The key of the registration whose simulator frame the tab talks to: the
+     * extension's own key, or the key its registration's `simulator` names.
+     */
+    simulatorKey: string;
     /** The fully qualified names of the fixed-instance types whose instances the tab creates; undefined if it creates none. */
     creates?: string[];
     /** The tab frame's sandbox gains allow-popups and allow-popups-to-escape-sandbox. */
@@ -112,8 +119,10 @@ const loggedSimxLabels = new Set<string>();
 /**
  * Returns the editor tabs of `simulatorExtensions`, in registration order: those
  * the simulator driver resolved an `editorUrl` for, which it does only for a
- * permanent registration that declares an `editor` and sets `allowEditorTab`,
- * each named in the user's language. The tab of a registration whose label holds
+ * registration that declares an `editor` and sets `allowEditorTab` and whose tab
+ * talks to a permanent simulator frame, each named in the user's language and
+ * talking to the simulator frame of its resolved `simulatorKey`, else to that of
+ * its own key. The tab of a registration whose label holds
  * no non-empty name (no label, an empty text, or a map whose values are all empty)
  * is named by the registration's key, and the registration is logged once per key.
  */
@@ -137,6 +146,7 @@ export function getSimxEditorRegistrations(simulatorExtensions: pxt.Map<SimxEdit
             icon: simx.iconUrl ? undefined : simx.editor.icon,
             iconUrl: simx.iconUrl,
             url: simx.editorUrl,
+            simulatorKey: simx.simulatorKey || key,
             creates: simx.creates,
             allowPopups: simx.allowPopups,
             allowClipboard: simx.allowClipboard,
@@ -168,6 +178,71 @@ export function isSimxInProject(key: string, dependencies: string[]): boolean {
     const extension = getSimxExtension(key);
     if (!extension) return false;
     return dependencies.some(dep => getDependencyExtension(dep)?.toLowerCase() === extension);
+}
+
+/** A package the open project has loaded, with the packages it depends on. */
+export interface SimxProjectPackage {
+    /** The package's version spec, such as `github:owner/repo/path#ref`. */
+    spec: string | undefined;
+    /** The version specs of the packages it depends on directly; undefined for one the project did not resolve. */
+    dependencies: (string | undefined)[];
+}
+
+/**
+ * Returns true if, among `packages`, a package whose version spec names the
+ * GitHub extension `key` names depends, directly or through other packages of
+ * `packages`, on a package whose version spec names the extension
+ * `dependencyKey` names, each matched by full name ignoring case, as
+ * {@link isSimxInProject} matches them. A dependency is followed to the
+ * packages of `packages` with the same version spec. A key that names no
+ * repository, or no package of `packages`, depends on nothing.
+ * @param packages the packages the open project has loaded, in any order
+ */
+export function simxDependsOn(packages: SimxProjectPackage[], key: string, dependencyKey: string): boolean {
+    const extension = getSimxExtension(key);
+    const dependency = getSimxExtension(dependencyKey);
+    if (!extension || !dependency) return false;
+    const names = (spec: string | undefined, name: string) => getDependencyExtension(spec)?.toLowerCase() === name;
+    const bySpec = new Map<string, SimxProjectPackage[]>();
+    for (const p of packages) {
+        if (p.spec !== undefined) bySpec.set(p.spec, (bySpec.get(p.spec) || []).concat(p));
+    }
+    // the version specs of the dependencies still to follow, and those already followed
+    const pending: string[] = [];
+    const followed = new Set<string>();
+    const follow = (p: SimxProjectPackage) => pending.push(...p.dependencies.filter((spec): spec is string => spec !== undefined));
+    packages.filter(p => names(p.spec, extension)).forEach(follow);
+    while (pending.length) {
+        const spec = pending.pop();
+        if (followed.has(spec)) continue;
+        followed.add(spec);
+        if (names(spec, dependency)) return true;
+        (bySpec.get(spec) || []).forEach(follow);
+    }
+    return false;
+}
+
+/**
+ * Returns true if the project includes the simulator extension registered under
+ * `key`, as {@link isSimxInProject} decides it, and, when its registration's tab
+ * talks to the simulator frame of another key, the extension depends on that
+ * key's extension, as {@link simxDependsOn} decides it.
+ * @param simulatorKey the key whose simulator frame the registration's tab talks to; undefined, or `key` itself, for a registration naming no other's
+ * @param dependencies the version specs of the project's dependencies, direct or not
+ * @param getPackages returns the packages the open project has loaded; called only to decide a dependency
+ * @param onIndependent called when the project includes the extension but the extension does not depend on that of `simulatorKey`
+ */
+export function projectIncludesSimx(
+    key: string,
+    simulatorKey: string | undefined,
+    dependencies: string[],
+    getPackages: () => SimxProjectPackage[],
+    onIndependent?: (key: string, simulatorKey: string) => void
+): boolean {
+    if (!isSimxInProject(key, dependencies)) return false;
+    if (!simulatorKey || simulatorKey === key || simxDependsOn(getPackages(), key, simulatorKey)) return true;
+    onIndependent?.(key, simulatorKey);
+    return false;
 }
 
 /**
@@ -233,11 +308,33 @@ export function findSimxInstanceCreator(registrations: SimxEditorRegistration[],
 
 /**
  * Returns the registrations among `registrations` whose extension the project
- * includes, as {@link isSimxInProject} decides it.
+ * includes, as {@link projectIncludesSimx} decides it from each registration's
+ * `simulatorKey`.
  * @param dependencies the version specs of the project's dependencies, direct or not
+ * @param getPackages returns the packages the open project has loaded; called at most once, and only to decide a dependency
+ * @param onIndependent called for each registration whose extension the project includes but which does not depend on the extension whose simulator frame its tab talks to
  */
-export function getProjectSimxEditors(registrations: SimxEditorRegistration[], dependencies: string[]): SimxEditorRegistration[] {
-    return registrations.filter(r => isSimxInProject(r.key, dependencies));
+export function getProjectSimxEditors(
+    registrations: SimxEditorRegistration[],
+    dependencies: string[],
+    getPackages: () => SimxProjectPackage[],
+    onIndependent?: (key: string, simulatorKey: string) => void
+): SimxEditorRegistration[] {
+    // the packages, read at most once for the whole call
+    let packages: SimxProjectPackage[] | undefined;
+    const readOnce = () => packages || (packages = getPackages());
+    return registrations.filter(r => projectIncludesSimx(r.key, r.simulatorKey, dependencies, readOnce, onIndependent));
+}
+
+/**
+ * Returns the keys of the tabs among `registrations` that talk to the simulator
+ * frame of `key`, those whose `simulatorKey` is `key`: the frame's own tab
+ * first, if it is among them, then the others in the order of `registrations`.
+ * @param registrations the tabs the editor offers the open project, in registration order
+ */
+export function getSimxFrameTabs(registrations: SimxEditorRegistration[], key: string): string[] {
+    const keys = registrations.filter(r => r.simulatorKey === key).map(r => r.key);
+    return keys.indexOf(key) > 0 ? [key].concat(keys.filter(k => k !== key)) : keys;
 }
 
 /**
@@ -258,15 +355,27 @@ export function getSimxEditorKeyOfMarker(name: string, registrations: SimxEditor
 /**
  * Returns the reply to a request the simulator frame of the extension
  * registered under `key` posted to the editor, once the simulator driver has
- * let it through.
- * @param open shows the extension's tab; returns false, showing nothing, if the editor offers no such tab here
+ * let it through. A tabs request is answered with `tabs`. An open request shows
+ * the tab its `key` names, or the frame's own when it names none, and is
+ * refused with `INVALID_REQUEST` when its `key` is present but not a string,
+ * and with `PERMISSION_DENIED` when that tab is not among `tabs`.
+ * @param tabs the keys of the tabs that talk to the frame, as {@link getSimxFrameTabs} lists them
+ * @param open shows the tab of the given key; returns false, showing nothing, if the editor offers no such tab here
  */
-export function answerSimxEditorRequest(key: string, msg: unknown, open: (key: string) => boolean): SimxEditorReply {
+export function answerSimxEditorRequest(key: string, msg: unknown, tabs: string[], open: (key: string) => boolean): SimxEditorReply {
     const subtype = (msg as { subtype?: unknown })?.subtype;
     const id = requestId(msg);
+    if (subtype === "tabs")
+        return { type: SIMXEDITOR_MESSAGE_TYPE, id, subtype: "tabs", keys: tabs.slice() };
     if (subtype !== "open")
         return errorReply(SIMXEDITOR_MESSAGE_TYPE, id, "INVALID_REQUEST", `Unknown request ${subtype}.`);
-    if (!open(key))
+    const requested = (msg as { key?: unknown }).key;
+    if (requested !== undefined && typeof requested !== "string")
+        return errorReply(SIMXEDITOR_MESSAGE_TYPE, id, "INVALID_REQUEST", "The key must be a string.");
+    const tabKey = requested === undefined ? key : requested;
+    if (tabs.indexOf(tabKey) < 0)
+        return errorReply(SIMXEDITOR_MESSAGE_TYPE, id, "PERMISSION_DENIED", "The simulator frame does not serve that tab.");
+    if (!open(tabKey))
         return errorReply(SIMXEDITOR_MESSAGE_TYPE, id, "UNAVAILABLE", "The editor does not offer this extension's tab here.");
     return { type: SIMXEDITOR_MESSAGE_TYPE, id, subtype: "ack" };
 }
@@ -306,6 +415,8 @@ export interface SimxEditorHostOptions {
 /** A tab frame, with what the host knows of it. */
 interface SimxEditorTab {
     key: string;
+    // the key of the simulator frame the tab talks to
+    simulatorKey: string;
     frame: HTMLIFrameElement;
     // the element showing the editor's loading state for the tab, beside its frame
     loader: HTMLElement;
@@ -319,8 +430,9 @@ interface SimxEditorTab {
  * Hosts the editor tab frames of simulator extensions in one container element:
  * creates each on first use, shows one at a time, posts their lifecycle and
  * simulator events, and brokers a `MessageChannel` between each ready tab frame
- * and the loaded simulator frame of the same key. Shows the shown tab's loader,
- * which names the tab, over that tab until it is ready.
+ * and the loaded simulator frame it talks to, of its registration's
+ * `simulatorKey`. Shows the shown tab's loader, which names the tab, over that
+ * tab until it is ready.
  */
 export class SimxEditorHost {
     protected tabs: pxt.Map<SimxEditorTab> = {};
@@ -350,25 +462,24 @@ export class SimxEditorHost {
 
     /**
      * Shows the tab of `registration`, hiding any other, creating its frame in
-     * `container` if it has none, and starting the simulator frame of the same
-     * key if none exists. Posts `hidden` to the tab hidden and `shown` to the tab
-     * shown, if they are ready.
+     * `container` if it has none, and starting the simulator frame it talks to,
+     * of the registration's `simulatorKey`, if none exists. Posts `hidden` to the
+     * tab hidden and `shown` to the tab shown, if they are ready.
      */
     show(registration: SimxEditorRegistration, container: HTMLElement, params: SimxEditorFrameParams) {
         if (!this.tabs[registration.key]) this.createTab(registration, container, params);
-        this.options.startSimulatorExtension(registration.key);
+        this.options.startSimulatorExtension(this.tabs[registration.key].simulatorKey);
         this.setShown(registration.key);
     }
 
     /**
-     * Starts the simulator frame of every tab whose simulator frame does not
-     * exist, as after the simulator driver removes its frames. A port pair is
+     * Starts, once per key, the simulator frame every tab talks to, where it does
+     * not exist, as after the simulator driver removes its frames. Port pairs are
      * brokered once each new frame loads.
      */
     ensureSimulatorFrames() {
-        for (const key of Object.keys(this.tabs)) {
-            this.options.startSimulatorExtension(key);
-        }
+        const keys = new Set(Object.keys(this.tabs).map(k => this.tabs[k].simulatorKey));
+        keys.forEach(key => this.options.startSimulatorExtension(key));
     }
 
     /** Hides the shown tab, if any, posting it `hidden` if it is ready. */
@@ -430,7 +541,7 @@ export class SimxEditorHost {
         const loader = this.options.createLoader(registration.label);
         container.appendChild(loader);
         container.appendChild(frame);
-        this.tabs[key] = { key, frame, loader, origin: url.origin, ready: false };
+        this.tabs[key] = { key, simulatorKey: registration.simulatorKey, frame, loader, origin: url.origin, ready: false };
         this.options.addTabFrame(key, frame);
     }
 
@@ -472,11 +583,14 @@ export class SimxEditorHost {
 
     /**
      * Records that the simulator frame of `key` finished loading a page, and
-     * brokers a port between it and the tab of `key`, if that tab is ready.
+     * brokers a port between it and each ready tab that talks to it, in the
+     * order the tabs were created.
      */
     simulatorFrameLoaded(key: string, frame: HTMLIFrameElement) {
         this.simulatorFrames[key] = frame;
-        this.broker(key);
+        for (const tabKey of Object.keys(this.tabs)) {
+            if (this.tabs[tabKey].simulatorKey === key) this.broker(tabKey);
+        }
     }
 
     /** Posts `command` to every ready tab, as the editor gives it to the simulator. */
@@ -520,17 +634,19 @@ export class SimxEditorHost {
     }
 
     // creates a MessageChannel and posts one end to the tab of `key` and the other
-    // to the simulator frame of `key`, if the tab is ready and that frame is loaded
-    // and still in the page
+    // to the simulator frame the tab talks to, if the tab is ready and that frame
+    // is loaded and still in the page; each side's message names its own key and
+    // the other side's
     protected broker(key: string) {
         const tab = this.tabs[key];
-        const simulatorFrame = this.simulatorFrames[key];
         if (!tab?.ready || !tab.frame.contentWindow) return;
+        const simulatorFrame = this.simulatorFrames[tab.simulatorKey];
         if (!simulatorFrame?.isConnected || !simulatorFrame.contentWindow) return;
         const channel = this.options.createChannel();
-        const msg: SimxEditorPortMessage = { type: SIMXEDITOR_PORT_MESSAGE_TYPE, key };
-        simulatorFrame.contentWindow.postMessage(msg, new URL(simulatorFrame.src).origin, [channel.port1]);
-        tab.frame.contentWindow.postMessage(msg, tab.origin, [channel.port2]);
+        const toSimulator: SimxEditorPortMessage = { type: SIMXEDITOR_PORT_MESSAGE_TYPE, key: tab.simulatorKey, peer: key };
+        const toTab: SimxEditorPortMessage = { type: SIMXEDITOR_PORT_MESSAGE_TYPE, key, peer: tab.simulatorKey };
+        simulatorFrame.contentWindow.postMessage(toSimulator, new URL(simulatorFrame.src).origin, [channel.port1]);
+        tab.frame.contentWindow.postMessage(toTab, tab.origin, [channel.port2]);
     }
 
     protected post(key: string, msg: SimxEditorEvent) {

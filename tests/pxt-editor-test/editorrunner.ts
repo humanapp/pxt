@@ -9,13 +9,13 @@ import {
     answerSimxEditorRequest,
     findSimxInstanceCreator,
     getDependencyExtension,
-    getDependencyRepository,
     getProjectSimxEditors,
     getSimxEditorKeyOfMarker,
     getSimxEditorMarkerName,
     getSimxEditorRegistrations,
     getSimxFrameTabs,
     isSimxInProject,
+    opensSimxInstance,
     projectIncludesSimx,
     resolveSimxEditorLabel,
     simxDependsOn,
@@ -6244,8 +6244,25 @@ describe("simulator extension editor tab registrations", () => {
     });
 });
 
+// the packages of a project, each given by its version spec and those of its dependencies
+function packages(...entries: [string, (string | undefined)[]][]): SimxProjectPackage[] {
+    return entries.map(([spec, dependencies]) => ({ spec, dependencies }));
+}
+
 describe("simulator extension instance creators", () => {
     const TYPE = "ext.Thing";
+    const EXT = "someorg/pxt-ext";
+    const REF = "reforg/pxt-ref";
+    const MID = "midorg/pxt-mid";
+    const OTHER = "otherorg/pxt-other";
+    const included = ["github:someorg/pxt-ext#v2", "github:reforg/pxt-ref#v1", "github:midorg/pxt-mid#v1", "github:otherorg/pxt-other#v1"];
+    // a project whose reforg/pxt-ref depends on someorg/pxt-ext directly, and whose midorg/pxt-mid depends on it through reforg/pxt-ref
+    const depending = packages(
+        ["github:midorg/pxt-mid#v1", ["github:reforg/pxt-ref#v1"]],
+        ["github:reforg/pxt-ref#v1", ["*", "github:someorg/pxt-ext#v2"]],
+        ["github:someorg/pxt-ext#v2", ["github:otherorg/pxt-other#v1"]],
+        ["github:otherorg/pxt-other#v1", []],
+    );
 
     function registrations(map: pxt.Map<string[] | undefined>): SimxEditorRegistration[] {
         return getSimxEditorRegistrations(pxt.Util.mapMap(map, (key, creates) => ({
@@ -6256,8 +6273,8 @@ describe("simulator extension instance creators", () => {
         })));
     }
 
-    function find(regs: SimxEditorRegistration[], deps: string[], typeRepository: string | undefined, type = TYPE) {
-        const { creator, ignored } = findSimxInstanceCreator(getProjectSimxEditors(regs, deps, () => []), type, typeRepository);
+    function find(regs: SimxEditorRegistration[], deps: string[], typeExtension: string | undefined, type = TYPE, project: SimxProjectPackage[] = []) {
+        const { creator, ignored } = findSimxInstanceCreator(getProjectSimxEditors(regs, deps, () => []), type, typeExtension, () => project);
         return { creator: creator?.key, ignored };
     }
 
@@ -6274,17 +6291,96 @@ describe("simulator extension instance creators", () => {
         chai.expect(find(registrations({ "someorg/pxt-ext": [TYPE] }), ["github:otherorg/pxt-other"], "someorg/pxt-ext").creator).equals(undefined);
     });
 
-    it("ignores a claim on a type another repository, or the project's own code, declares", () => {
+    it("ignores a claim on a type declared by an extension the claimant neither belongs to nor depends on, or by the project's own code", () => {
         const regs = registrations({ "otherorg/pxt-other": [TYPE], "someorg/pxt-ext": [TYPE] });
         const deps = ["github:otherorg/pxt-other", "github:someorg/pxt-ext"];
-        chai.expect(find(regs, deps, "someorg/pxt-ext")).deep.equals({
+        // someorg/pxt-ext depends on otherorg/pxt-other, not the other way round
+        const project = packages(["github:someorg/pxt-ext", ["github:otherorg/pxt-other"]], ["github:otherorg/pxt-other", []]);
+        chai.expect(find(regs, deps, "someorg/pxt-ext", TYPE, project)).deep.equals({
             creator: "someorg/pxt-ext",
-            ignored: [{ key: "otherorg/pxt-other", reason: "OTHER_REPOSITORY" }],
+            ignored: [{ key: "otherorg/pxt-other", reason: "UNRELATED_EXTENSION" }],
         });
-        chai.expect(find(regs, deps, undefined)).deep.equals({
+        chai.expect(find(regs, deps, undefined, TYPE, project)).deep.equals({
             creator: undefined,
-            ignored: [{ key: "otherorg/pxt-other", reason: "OTHER_REPOSITORY" }, { key: "someorg/pxt-ext", reason: "OTHER_REPOSITORY" }],
+            ignored: [{ key: "otherorg/pxt-other", reason: "UNRELATED_EXTENSION" }, { key: "someorg/pxt-ext", reason: "UNRELATED_EXTENSION" }],
         });
+    });
+
+    it("is a registration whose extension depends on the type's declaring extension, directly or through other extensions", () => {
+        chai.expect(find(registrations({ [REF]: [TYPE] }), included, "SomeOrg/PXT-Ext", TYPE, depending)).deep.equals({ creator: REF, ignored: [] });
+        chai.expect(find(registrations({ [MID]: [TYPE] }), included, EXT, TYPE, depending)).deep.equals({ creator: MID, ignored: [] });
+        chai.expect(find(registrations({ [REF]: [TYPE] }), included, "someorg/pxt-ext/sub", TYPE, depending)).deep.equals({
+            creator: undefined,
+            ignored: [{ key: REF, reason: "UNRELATED_EXTENSION" }],
+        });
+        chai.expect(find(registrations({ [EXT]: [TYPE] }), included, REF, TYPE, depending)).deep.equals({
+            creator: undefined,
+            ignored: [{ key: EXT, reason: "UNRELATED_EXTENSION" }],
+        });
+    });
+
+    it("is the first in registration order of a claimant of the declaring repository and one depending on it", () => {
+        chai.expect(find(registrations({ [REF]: [TYPE], [EXT]: [TYPE] }), included, EXT, TYPE, depending)).deep.equals({
+            creator: REF,
+            ignored: [{ key: EXT, reason: "CLAIMED_EARLIER" }],
+        });
+        chai.expect(find(registrations({ [EXT]: [TYPE], [REF]: [TYPE] }), included, EXT, TYPE, depending)).deep.equals({
+            creator: EXT,
+            ignored: [{ key: REF, reason: "CLAIMED_EARLIER" }],
+        });
+    });
+
+    it("reads the packages at most once, and only to decide a dependency", () => {
+        let reads = 0;
+        const read = () => {
+            reads++;
+            return depending;
+        };
+        findSimxInstanceCreator(registrations({ [EXT]: [TYPE], "someorg/pxt-ext/sub": [TYPE] }), TYPE, EXT, read);
+        chai.expect(reads).equals(0);
+        findSimxInstanceCreator(registrations({ [REF]: [TYPE], [MID]: [TYPE], [OTHER]: [TYPE] }), TYPE, EXT, read);
+        chai.expect(reads).equals(1);
+    });
+
+    it("opens an instance declared in the creator's folder, or in that of the type's declaring repository when the creator depends on it, directly or not", () => {
+        for (const fileName of ["midorg/pxt-mid/things.g.ts", "someorg/pxt-ext/things.g.ts", "someorg/pxt-ext/sub/things.g.ts"])
+            chai.expect(opensSimxInstance(MID, { pkg: undefined, fileName }, EXT, () => depending), fileName).equals(true);
+        chai.expect(opensSimxInstance(REF, { pkg: undefined, fileName: "someorg/pxt-ext/things.g.ts" }, EXT, () => depending)).equals(true);
+        chai.expect(opensSimxInstance(EXT, { pkg: undefined, fileName: "someorg/pxt-ext/things.g.ts" }, undefined, () => [])).equals(true);
+    });
+
+    it("does not open an instance declared in the folder of another repository the creator depends on", () => {
+        // reforg/pxt-ref depends on someorg/pxt-ext, which declares the type, and on otherorg/pxt-other
+        const project = packages(
+            ["github:reforg/pxt-ref#v1", ["github:someorg/pxt-ext#v2", "github:otherorg/pxt-other#v1"]],
+            ["github:someorg/pxt-ext#v2", []],
+            ["github:otherorg/pxt-other#v1", []],
+        );
+        chai.expect(opensSimxInstance(REF, { pkg: undefined, fileName: "otherorg/pxt-other/things.g.ts" }, EXT, () => project)).equals(false);
+        chai.expect(opensSimxInstance(REF, { pkg: undefined, fileName: "someorg/pxt-ext/things.g.ts" }, EXT, () => project)).equals(true);
+    });
+
+    it("does not open an instance of a type whose declaring extension the creator does not depend on, outside the folders, or declared by a package", () => {
+        chai.expect(opensSimxInstance(EXT, { pkg: undefined, fileName: "reforg/pxt-ref/things.g.ts" }, REF, () => depending)).equals(false);
+        chai.expect(opensSimxInstance(REF, { pkg: undefined, fileName: "someorg/pxt-ext/things.g.ts" }, "SomeOrg/PXT-Ext/sub", () => depending)).equals(false);
+        chai.expect(opensSimxInstance(REF, { pkg: undefined, fileName: "thirdorg/pxt-third/things.g.ts" }, EXT, () => depending)).equals(false);
+        chai.expect(opensSimxInstance(REF, { pkg: undefined, fileName: "main.ts" }, EXT, () => depending)).equals(false);
+        chai.expect(opensSimxInstance(REF, { pkg: "ext", fileName: "someorg/pxt-ext/things.g.ts" }, EXT, () => depending)).equals(false);
+        chai.expect(opensSimxInstance(REF, { pkg: undefined, fileName: "someorg/pxt-ext/things.g.ts" }, undefined, () => depending)).equals(false);
+        chai.expect(opensSimxInstance(REF, { pkg: undefined, fileName: "someorg/pxt-ext/things.g.ts" }, EXT, () => [])).equals(false);
+    });
+
+    it("reads the packages only for an instance in the folder of the type's declaring repository and not the creator's", () => {
+        let reads = 0;
+        const read = () => {
+            reads++;
+            return depending;
+        };
+        opensSimxInstance(REF, { pkg: undefined, fileName: "reforg/pxt-ref/things.g.ts" }, EXT, read);
+        opensSimxInstance(REF, { pkg: undefined, fileName: "otherorg/pxt-other/things.g.ts" }, EXT, read);
+        chai.expect(reads).equals(0);
+        opensSimxInstance(REF, { pkg: undefined, fileName: "someorg/pxt-ext/things.g.ts" }, EXT, read);
+        chai.expect(reads).equals(1);
     });
 
     it("is the first in registration order of two registrations claiming one type, the other ignored", () => {
@@ -6296,12 +6392,6 @@ describe("simulator extension instance creators", () => {
         });
         chai.expect(find(regs, deps, "someorg/pxt-ext", "ext.Other").creator).equals("someorg/pxt-ext/a");
         chai.expect(find(regs, ["github:someorg/pxt-ext/a#v1"], "someorg/pxt-ext")).deep.equals({ creator: "someorg/pxt-ext/a", ignored: [] });
-    });
-
-    it("reads the repository of a dependency from its GitHub version spec only", () => {
-        chai.expect(getDependencyRepository("github:SomeOrg/pxt-ext/makecode/vm#v1.0.0")).equals("SomeOrg/pxt-ext");
-        for (const spec of ["*", "file:../pxt-ext", "workspace:abc", "", undefined])
-            chai.expect(getDependencyRepository(spec), spec).equals(undefined);
     });
 
     it("reads the extension of a dependency from its GitHub version spec only", () => {
@@ -6596,11 +6686,6 @@ describe("simulator extension shared simulator frames", () => {
     const EXT = "someorg/pxt-ext";
     const REF = "reforg/pxt-ref";
     const MID = "midorg/pxt-mid";
-
-    // the packages of a project, each given by its version spec and those of its dependencies
-    function packages(...entries: [string, (string | undefined)[]][]): SimxProjectPackage[] {
-        return entries.map(([spec, dependencies]) => ({ spec, dependencies }));
-    }
 
     // a registration as the driver resolves one whose tab talks to the simulator frame of `simulatorKey`
     function tab(key: string, simulatorKey = key, extra: Partial<SimxEditorRegistration> = {}): SimxEditorRegistration {

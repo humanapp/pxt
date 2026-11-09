@@ -62,7 +62,6 @@ import * as serialindicator from "./serialindicator"
 import * as assetEditor from "./components/assetEditor/editor";
 import * as simxEditor from "./simxEditor";
 import { getSimxEditorMarkerName } from "./simxEditorHost";
-import { getProjfsFolder, isDeclaredInProjectFolder } from "./projfsHost";
 import { SIMXEDITOR_MESSAGE_TYPE } from "../../pxtservices/simxeditor";
 import { showsSimxEditorTabs } from "./editorToggleLayout";
 import * as draganddrop from "./draganddrop";
@@ -922,15 +921,18 @@ export class ProjectView
      * Returns the key of the simulator extension whose editor tab opens the
      * fixed instance `instanceQName` and is offered here, or undefined if there
      * is none: the tab that creates the instances of the instance's type, when
-     * a file of the open project in that extension's folder declares the
-     * instance. The instance is read from the API info the blocks were built from.
+     * the open project's own code declares the instance in a file in that
+     * extension's folder, or in the folder of the repository of the extension
+     * declaring the instance's type when that extension depends on the
+     * declaring extension. The instance and its type are read from the API
+     * info the blocks were built from.
      */
     getSimxInstanceOpener(instanceQName: string): string | undefined {
-        const instance = pxtblockly.cachedBlockInfo?.apis.byQName[instanceQName];
+        const apis = pxtblockly.cachedBlockInfo?.apis.byQName;
+        const instance = apis?.[instanceQName];
         if (!instance) return undefined;
         const key = this.getSimxInstanceCreator(instance.retType);
-        const folder = key && getProjfsFolder(key);
-        return folder && isDeclaredInProjectFolder(instance, folder) ? key : undefined;
+        return key && simulator.projectSimxEditorOpensInstance(key, instance, apis[instance.retType]?.pkg) ? key : undefined;
     }
 
     /**

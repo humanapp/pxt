@@ -17,10 +17,11 @@ import { ProjprogramCompileOutcome, ProjprogramHost } from "./projprogramHost";
 import {
     answerSimxEditorRequest,
     findSimxInstanceCreator,
-    getDependencyRepository,
+    getDependencyExtension,
     getProjectSimxEditors,
     getSimxEditorRegistrations,
     getSimxFrameTabs,
+    opensSimxInstance,
     projectIncludesSimx,
     SimxEditorHost,
     SimxEditorRegistration,
@@ -432,24 +433,40 @@ const loggedSimxClaims = new Set<string>();
  * Returns the key of the simulator extension whose editor tab creates the
  * instances of the fixed-instance type `typeQName`, among those whose tabs the
  * editor offers the open project, or undefined if none does. Only a
- * registration of the GitHub repository of the type's declaring package may
- * create them, and the first such in registration order does; every other
- * registration naming the type in its `creates` is logged once per project load.
+ * registration of the GitHub repository of the type's declaring package, or
+ * one whose extension depends on that package's extension, may create them,
+ * and the first such in registration order does; every other registration
+ * naming the type in its `creates` is logged once per project load.
  * @param declaringPackage the id of the package that declares the type, as the type's `pkg` gives it; undefined for the project's own code
  */
 export function getProjectSimxInstanceCreator(typeQName: string, declaringPackage: string | undefined): string | undefined {
     const registrations = getProjectSimxEditorRegistrations();
-    const spec = declaringPackage ? pkg.mainPkg?.deps[declaringPackage]?._verspec : undefined;
-    const { creator, ignored } = findSimxInstanceCreator(registrations, typeQName, getDependencyRepository(spec));
+    const { creator, ignored } = findSimxInstanceCreator(registrations, typeQName, getPackageExtension(declaringPackage), getProjectPackages);
     for (const { key, reason } of ignored) {
         const claim = `${key} ${typeQName}`;
         if (loggedSimxClaims.has(claim)) continue;
         loggedSimxClaims.add(claim);
-        pxt.warn(reason === "OTHER_REPOSITORY"
-            ? `simulator extension ${key}: ignoring its claim to create ${typeQName}, which no package of its repository declares`
+        pxt.warn(reason === "UNRELATED_EXTENSION"
+            ? `simulator extension ${key}: ignoring its claim to create ${typeQName}, which no package of its repository declares and whose declaring extension it does not depend on`
             : `simulator extension ${key}: ignoring its claim to create ${typeQName}, which an earlier registration creates`);
     }
     return creator?.key;
+}
+
+/**
+ * Returns true if the editor tab of the simulator extension registered under
+ * `key` opens the fixed instance `instance` of the open project, as
+ * {@link opensSimxInstance} decides it.
+ * @param instance the instance, as the API info gives it
+ * @param typeDeclaringPackage the id of the package that declares the instance's type, as the type's `pkg` gives it; undefined for the project's own code
+ */
+export function projectSimxEditorOpensInstance(key: string, instance: Pick<pxtc.SymbolInfo, "pkg" | "fileName">, typeDeclaringPackage: string | undefined): boolean {
+    return opensSimxInstance(key, instance, getPackageExtension(typeDeclaringPackage), getProjectPackages);
+}
+
+// the GitHub extension, `owner/repo[/path]`, of the open project's package `id`, from its version spec; undefined for no id, or a package not from GitHub
+function getPackageExtension(id: string | undefined): string | undefined {
+    return id ? getDependencyExtension(pkg.mainPkg?.deps[id]?._verspec) : undefined;
 }
 
 /** Tells every ready simulator extension editor tab that the editor is giving the simulator `command`. */

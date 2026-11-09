@@ -12,6 +12,7 @@ import {
     SimxEditorSimulatorState,
     SimxEditorTab,
 } from "../../pxtservices/simxeditor";
+import { getProjfsFolder, isDeclaredInProjectFolder } from "./projfsHost";
 import { errorReply, getSimxExtension, getSimxRepository, requestId } from "./simxRequests";
 
 // The editor side of simx editor tabs: the registrations that
@@ -224,6 +225,28 @@ export function simxDependsOn(packages: SimxProjectPackage[], key: string, depen
 }
 
 /**
+ * Returns true if the tab of the registration under `key` opens the fixed
+ * instance `instance`, whose type the GitHub extension `typeExtension`
+ * declares: the open project's own code declares the instance in the folder
+ * of the key's repository, or in that of `typeExtension`'s repository when
+ * the key's extension depends on `typeExtension`, as {@link simxDependsOn}
+ * decides it, each folder as {@link getProjfsFolder} gives it.
+ * @param instance the instance, as the API info gives it
+ * @param typeExtension the GitHub extension, `owner/repo[/path]`, of the package declaring the instance's type; undefined if that package is not from GitHub
+ * @param getPackages returns the packages the open project has loaded; called only when the instance lies in the folder of `typeExtension`'s repository and not in the key's
+ */
+export function opensSimxInstance(
+    key: string,
+    instance: Pick<pxtc.SymbolInfo, "pkg" | "fileName">,
+    typeExtension: string | undefined,
+    getPackages: () => SimxProjectPackage[]
+): boolean {
+    const declaresIn = (folder: string | undefined) => !!folder && isDeclaredInProjectFolder(instance, folder);
+    if (declaresIn(getProjfsFolder(key))) return true;
+    return !!typeExtension && declaresIn(getProjfsFolder(typeExtension)) && simxDependsOn(getPackages(), key, typeExtension);
+}
+
+/**
  * Returns true if the project includes the simulator extension registered under
  * `key`, as {@link isSimxInProject} decides it, and, when its registration's tab
  * talks to the simulator frame of another key, the extension depends on that
@@ -247,16 +270,6 @@ export function projectIncludesSimx(
 }
 
 /**
- * Returns the GitHub repository, `owner/repo`, of the dependency whose version
- * spec is `dependency`, such as `github:owner/repo/path#ref`; undefined if it
- * is not a `github:` spec, or names no repository.
- */
-export function getDependencyRepository(dependency: string | undefined): string | undefined {
-    if (!/^github:/i.test(dependency || "")) return undefined;
-    return pxt.github.parseRepoId(dependency)?.slug;
-}
-
-/**
  * Returns the GitHub extension the dependency whose version spec is
  * `dependency` names: its repository, `owner/repo`, or an extension in a
  * subfolder of it, `owner/repo/path`, for a spec such as
@@ -270,8 +283,8 @@ export function getDependencyExtension(dependency: string | undefined): string |
 
 /** Why the editor ignores a registration's claim, in its `creates`, on a type. */
 export type SimxCreatesIgnoredReason =
-    /** No package of the registration's repository declares the type. */
-    "OTHER_REPOSITORY"
+    /** No package of the registration's repository, nor of an extension its extension depends on, declares the type. */
+    "UNRELATED_EXTENSION"
     /** A registration earlier in registration order already creates the type's instances. */
     | "CLAIMED_EARLIER";
 
@@ -286,19 +299,29 @@ export interface SimxInstanceCreator {
 /**
  * Returns the registration among `registrations` whose tab creates the
  * instances of the type `typeQName`: the first, in registration order, whose
- * `creates` names the type and whose repository (the `owner/repo` its key
- * names, in any case) is `typeRepository`. Every other registration naming the
- * type is returned among the ignored claims.
+ * `creates` names the type and whose key names the repository of
+ * `typeExtension`, in any case, or an extension that depends on
+ * `typeExtension`, as {@link simxDependsOn} decides it. Every other
+ * registration naming the type is returned among the ignored claims.
  * @param registrations the registrations the project includes, in registration order
- * @param typeRepository the GitHub repository, `owner/repo`, of the package declaring the type; undefined if that package is not from GitHub, as for the project's own code
+ * @param typeExtension the GitHub extension, `owner/repo[/path]`, of the package declaring the type; undefined if that package is not from GitHub, as for the project's own code
+ * @param getPackages returns the packages the open project has loaded; called at most once, and only to decide a dependency
  */
-export function findSimxInstanceCreator(registrations: SimxEditorRegistration[], typeQName: string, typeRepository: string | undefined): SimxInstanceCreator {
-    const repository = typeRepository?.toLowerCase();
+export function findSimxInstanceCreator(
+    registrations: SimxEditorRegistration[],
+    typeQName: string,
+    typeExtension: string | undefined,
+    getPackages: () => SimxProjectPackage[]
+): SimxInstanceCreator {
+    const repository = typeExtension && getSimxRepository(typeExtension);
+    // the packages, read at most once for the whole call
+    let packages: SimxProjectPackage[] | undefined;
+    const related = (key: string) => getSimxRepository(key) === repository || simxDependsOn(packages || (packages = getPackages()), key, typeExtension);
     const result: SimxInstanceCreator = { creator: undefined, ignored: [] };
     for (const r of registrations) {
         if (!r.creates?.some(type => type === typeQName)) continue;
-        if (!repository || getSimxRepository(r.key) !== repository)
-            result.ignored.push({ key: r.key, reason: "OTHER_REPOSITORY" });
+        if (!repository || !related(r.key))
+            result.ignored.push({ key: r.key, reason: "UNRELATED_EXTENSION" });
         else if (result.creator)
             result.ignored.push({ key: r.key, reason: "CLAIMED_EARLIER" });
         else

@@ -920,7 +920,8 @@ export class ProjectView
     /**
      * Returns the key of the simulator extension whose editor tab opens the
      * fixed instance `instanceQName` and is offered here, or undefined if there
-     * is none: the tab that creates the instances of the instance's type, when
+     * is none: the tab the instance's `editor` attribute names, when it has
+     * one; else the tab that creates the instances of the instance's type, when
      * the open project's own code declares the instance in a file in that
      * extension's folder, or in the folder of the repository of the extension
      * declaring the instance's type when that extension depends on the
@@ -931,8 +932,10 @@ export class ProjectView
         const apis = pxtblockly.cachedBlockInfo?.apis.byQName;
         const instance = apis?.[instanceQName];
         if (!instance) return undefined;
-        const key = this.getSimxInstanceCreator(instance.retType);
-        return key && simulator.projectSimxEditorOpensInstance(key, instance, apis[instance.retType]?.pkg) ? key : undefined;
+        return simulator.getProjectSimxInstanceOpener(instance, this.getSimxEditors().map(r => r.key), () => {
+            const key = this.getSimxInstanceCreator(instance.retType);
+            return key && simulator.projectSimxEditorOpensInstance(key, instance, apis[instance.retType]?.pkg) ? key : undefined;
+        });
     }
 
     /**

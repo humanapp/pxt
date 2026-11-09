@@ -246,6 +246,70 @@ export function opensSimxInstance(
     return !!typeExtension && declaresIn(getProjfsFolder(typeExtension)) && simxDependsOn(getPackages(), key, typeExtension);
 }
 
+/** Why the editor ignores a fixed instance's `editor` attribute. */
+export type SimxInstanceEditorIgnoredReason =
+    /** The value is not a kind, a colon and an identifier, or its `simx` identifier names no repository. */
+    "MALFORMED"
+    /** The value's kind is not one the editor knows. */
+    | "UNKNOWN_KIND";
+
+/** What a fixed instance's `editor` attribute names, or why the editor ignores it. */
+export type SimxInstanceEditor =
+    { kind: "simx", id: string }
+    | { reason: SimxInstanceEditorIgnoredReason };
+
+/**
+ * Reads `value`, the `editor` attribute of a fixed instance, `<kind>:<id>`,
+ * split at its first colon: returns the kind and the identifier the kind
+ * interprets, or why the editor ignores the value. The one kind is `simx`,
+ * whose identifier is the registration key of the simulator extension whose
+ * editor tab edits the instance, such as `owner/repo/path`.
+ * @returns undefined for an instance without the attribute
+ */
+export function parseSimxInstanceEditor(value: string | undefined): SimxInstanceEditor | undefined {
+    if (value === undefined) return undefined;
+    const colon = value.indexOf(":");
+    const kind = value.slice(0, colon);
+    const id = value.slice(colon + 1);
+    if (colon <= 0 || !id) return { reason: "MALFORMED" };
+    if (kind !== "simx") return { reason: "UNKNOWN_KIND" };
+    if (!getSimxExtension(id)) return { reason: "MALFORMED" };
+    return { kind, id };
+}
+
+/**
+ * Returns the key of the tab among `offered` that opens the fixed instance
+ * `instance`, or undefined if none does. An instance whose `editor` attribute
+ * names a `simx` key, as {@link parseSimxInstanceEditor} reads it, opens in
+ * the offered tab of that key, compared ignoring case, whatever creates the
+ * instance's type; an attribute the editor ignores opens nothing and is
+ * logged once per instance. An instance without the attribute opens in the
+ * tab `getCreatorOpener` returns.
+ * @param instance the instance, as the API info gives it
+ * @param offered the keys of the tabs the editor offers the open project
+ * @param getCreatorOpener returns the key of the tab that creates the instances of the instance's type, when that tab opens the instance; called only for an instance without the attribute
+ * @param logged the qualified names of the instances whose ignored attribute was logged; updated
+ */
+export function findSimxInstanceOpener(
+    instance: Pick<pxtc.SymbolInfo, "qName" | "attributes">,
+    offered: string[],
+    getCreatorOpener: () => string | undefined,
+    logged: Set<string>
+): string | undefined {
+    const value = instance.attributes?.editor;
+    const editor = parseSimxInstanceEditor(value);
+    if (!editor) return getCreatorOpener();
+    if ("reason" in editor) {
+        if (!logged.has(instance.qName)) {
+            logged.add(instance.qName);
+            pxt.warn(`fixed instance ${instance.qName}: ignoring its editor attribute "${value}" (${editor.reason}); offering no Edit entry`);
+        }
+        return undefined;
+    }
+    const extension = getSimxExtension(editor.id);
+    return offered.find(key => getSimxExtension(key) === extension);
+}
+
 /**
  * Returns true if the project includes the simulator extension registered under
  * `key`, as {@link isSimxInProject} decides it, and, when its registration's tab

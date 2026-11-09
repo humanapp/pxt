@@ -8,6 +8,7 @@ import { getTextAtTime, HistoryFile, parseHistoryFile, updateHistory } from "../
 import {
     answerSimxEditorRequest,
     findSimxInstanceCreator,
+    findSimxInstanceOpener,
     getDependencyExtension,
     getProjectSimxEditors,
     getSimxEditorKeyOfMarker,
@@ -16,6 +17,7 @@ import {
     getSimxFrameTabs,
     isSimxInProject,
     opensSimxInstance,
+    parseSimxInstanceEditor,
     projectIncludesSimx,
     resolveSimxEditorLabel,
     simxDependsOn,
@@ -6121,12 +6123,7 @@ describe("simulator extension editor tab registrations", () => {
             "emptyvaluesorg/pxt-ext": { index: "index.html", label: { "en": "", "fr": "" } },
         };
         const keys = Object.keys(unnamed);
-        const warnings: unknown[][] = [];
-        class RecordingLogger extends pxt.ConsoleLogger {
-            warn(...args: unknown[]) { warnings.push(args); }
-        }
-        pxt.setLogger(new RecordingLogger());
-        try {
+        const warnings = recordWarnings(() => {
             for (let i = 0; i < 2; i++) {
                 const registrations = getSimxEditorRegistrations({
                     ...pxt.Util.mapMap(unnamed, (key, editor) => resolved(key, { editor })),
@@ -6134,9 +6131,7 @@ describe("simulator extension editor tab registrations", () => {
                 });
                 chai.expect(registrations.map(r => [r.key, r.label])).deep.equals([...keys.map(key => [key, key]), [EXT, EXT + " label"]]);
             }
-        } finally {
-            pxt.setLogger(new pxt.ConsoleLogger());
-        }
+        });
         chai.expect(warnings.length).equals(keys.length);
         chai.expect(keys.map(key => warnings.filter(w => w.join(" ").indexOf(key) >= 0).length)).deep.equals(keys.map(() => 1));
     });
@@ -6247,6 +6242,21 @@ describe("simulator extension editor tab registrations", () => {
 // the packages of a project, each given by its version spec and those of its dependencies
 function packages(...entries: [string, (string | undefined)[]][]): SimxProjectPackage[] {
     return entries.map(([spec, dependencies]) => ({ spec, dependencies }));
+}
+
+// runs `run` with a logger recording what it warns, and returns those warnings
+function recordWarnings(run: () => void): unknown[][] {
+    const warnings: unknown[][] = [];
+    class RecordingLogger extends pxt.ConsoleLogger {
+        warn(...args: unknown[]) { warnings.push(args); }
+    }
+    pxt.setLogger(new RecordingLogger());
+    try {
+        run();
+    } finally {
+        pxt.setLogger(new pxt.ConsoleLogger());
+    }
+    return warnings;
 }
 
 describe("simulator extension instance creators", () => {
@@ -6400,6 +6410,75 @@ describe("simulator extension instance creators", () => {
         chai.expect(getDependencyExtension("github:someorg/pxt-ext")).equals("someorg/pxt-ext");
         for (const spec of ["*", "file:../pxt-ext", "workspace:abc", "", undefined])
             chai.expect(getDependencyExtension(spec), spec).equals(undefined);
+    });
+});
+
+describe("simulator extension instance openers", () => {
+    const EXT = "someorg/pxt-ext";
+    const REF = "reforg/pxt-ref";
+    const offered = [EXT, REF];
+    const MALFORMED = ["", "true", "simx", "simx:", ":reforg/pxt-ref", "simx:pxt-ref"];
+    const UNKNOWN_KIND = ["tab:reforg/pxt-ref", "SIMX:reforg/pxt-ref"];
+
+    // a fixed instance `ns.<name>` whose `editor` attribute is `editor`, absent when undefined
+    function instance(name: string, editor?: string): Pick<pxtc.SymbolInfo, "qName" | "attributes"> {
+        const attributes = { fixedInstance: true } as pxtc.CommentAttrs;
+        if (editor !== undefined) attributes.editor = editor;
+        return { qName: `ns.${name}`, attributes };
+    }
+
+    it("keeps the attribute verbatim when parsing a declaration's comment", () => {
+        const attributes = pxtc.parseCommentString(`//% fixedInstance block="chaser" editor="simx:owner/repo/path"`);
+        chai.expect(attributes.editor).equals("simx:owner/repo/path");
+        chai.expect(pxtc.parseCommentString(`//% fixedInstance editor="simx:owner/repo"`).editor).equals("simx:owner/repo");
+    });
+
+    it("reads a simx key, split at the first colon", () => {
+        chai.expect(parseSimxInstanceEditor("simx:owner/repo/path")).deep.equals({ kind: "simx", id: "owner/repo/path" });
+        chai.expect(parseSimxInstanceEditor("simx:Owner/Repo")).deep.equals({ kind: "simx", id: "Owner/Repo" });
+        chai.expect(parseSimxInstanceEditor(undefined)).equals(undefined);
+    });
+
+    it("tells a malformed value from an unknown kind", () => {
+        chai.expect(MALFORMED.map(parseSimxInstanceEditor)).deep.equals(MALFORMED.map(() => ({ reason: "MALFORMED" })));
+        chai.expect(UNKNOWN_KIND.map(parseSimxInstanceEditor)).deep.equals(UNKNOWN_KIND.map(() => ({ reason: "UNKNOWN_KIND" })));
+    });
+
+    it("opens an instance naming an offered key in that key's tab, whatever creates its type, without asking the creator rule", () => {
+        let asked = 0;
+        const creator = () => {
+            asked++;
+            return EXT;
+        };
+        chai.expect(findSimxInstanceOpener(instance("chaser", `simx:${REF}`), offered, creator, new Set())).equals(REF);
+        chai.expect(findSimxInstanceOpener(instance("chaser", "simx:RefOrg/PXT-Ref"), offered, creator, new Set())).equals(REF);
+        chai.expect(findSimxInstanceOpener(instance("chaser", `simx:${REF}`), offered, () => undefined, new Set())).equals(REF);
+        chai.expect(asked).equals(0);
+    });
+
+    it("opens an instance naming a key whose tab is not offered nowhere, logging nothing", () => {
+        const warnings = recordWarnings(() => {
+            chai.expect(findSimxInstanceOpener(instance("chaser", `simx:${REF}`), [EXT], () => EXT, new Set())).equals(undefined);
+            chai.expect(findSimxInstanceOpener(instance("chaser", "simx:thirdorg/pxt-third"), offered, () => EXT, new Set())).equals(undefined);
+        });
+        chai.expect(warnings.length).equals(0);
+    });
+
+    it("opens an instance with a malformed value or an unknown kind nowhere, logging each instance once with its code", () => {
+        const values = [...MALFORMED, ...UNKNOWN_KIND];
+        const logged = new Set<string>();
+        const warnings = recordWarnings(() => {
+            for (let i = 0; i < 2; i++)
+                values.forEach((value, n) => chai.expect(findSimxInstanceOpener(instance(`i${n}`, value), offered, () => EXT, logged), value).equals(undefined));
+        });
+        chai.expect(warnings.length).equals(values.length);
+        const codes = values.map((value, n) => warnings.filter(w => w.join(" ").indexOf(`ns.i${n}:`) >= 0).map(w => /\((\w+)\)/.exec(w.join(" "))?.[1]));
+        chai.expect(codes).deep.equals([...MALFORMED.map(() => ["MALFORMED"]), ...UNKNOWN_KIND.map(() => ["UNKNOWN_KIND"])]);
+    });
+
+    it("opens an instance without the attribute where the creator rule does", () => {
+        chai.expect(findSimxInstanceOpener(instance("chaser"), offered, () => EXT, new Set())).equals(EXT);
+        chai.expect(findSimxInstanceOpener(instance("chaser"), offered, () => undefined, new Set())).equals(undefined);
     });
 });
 
@@ -6594,6 +6673,36 @@ describe("fixed-instance dropdown options", () => {
             { ...instanceSymbol("plain", "ns.Thing"), attributes: {} as pxtc.CommentAttrs },
         ]);
         chai.expect(values(getFixedInstanceDropdownOptions(blocksInfo, "ns.Thing", undefined, new StubImageConverter()))).deep.equals(["ns.special"]);
+    });
+
+    it("offers the entry asking to edit the instance the field holds as the instance's editor attribute decides, else as the creator rule does", () => {
+        const EXT = "someorg/pxt-ext";
+        const REF = "reforg/pxt-ref";
+        // whether the field holding the instance `ns.chaser`, whose `editor` attribute is `editor`, offers the entry, with the tabs `offered` and the creator rule choosing `creator`
+        const offersEdit = (editor: string | undefined, offered: string[], creator: string | undefined) => {
+            const attributes = (editor === undefined ? {} : { editor }) as pxtc.CommentAttrs;
+            const blocksInfo = thingBlocksInfo([instanceSymbol("chaser", "ns.Thing", attributes)]);
+            const { canOpenInstance } = pxt.react;
+            pxt.react.canOpenInstance = qName => !!findSimxInstanceOpener(blocksInfo.apis.byQName[qName], offered, () => creator, new Set());
+            try {
+                return openedValues({ getBlocksInfo: () => blocksInfo }).includes(OPEN_INSTANCE_OPTION_VALUE);
+            } finally {
+                pxt.react.canOpenInstance = canOpenInstance;
+            }
+        };
+        const cases: [string | undefined, string[], string | undefined][] = [
+            [`simx:${REF}`, [EXT, REF], EXT],
+            [`simx:${REF}`, [EXT, REF], undefined],
+            [`simx:${REF}`, [EXT], EXT],
+            ["simx:", [EXT, REF], EXT],
+            ["tab:reforg/pxt-ref", [EXT, REF], EXT],
+            [undefined, [EXT, REF], EXT],
+            [undefined, [EXT, REF], undefined],
+        ];
+        let offers: boolean[];
+        const warnings = recordWarnings(() => offers = cases.map(c => offersEdit(...c)));
+        chai.expect(offers).deep.equals([true, true, false, false, false, true, false]);
+        chai.expect(warnings.length).equals(2);
     });
 });
 

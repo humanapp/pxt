@@ -17,6 +17,7 @@ import { ProjprogramCompileOutcome, ProjprogramHost } from "./projprogramHost";
 import {
     answerSimxEditorRequest,
     findSimxInstanceCreator,
+    findSimxInstanceOpener,
     getDependencyExtension,
     getProjectSimxEditors,
     getSimxEditorRegistrations,
@@ -464,6 +465,22 @@ export function projectSimxEditorOpensInstance(key: string, instance: Pick<pxtc.
     return opensSimxInstance(key, instance, getPackageExtension(typeDeclaringPackage), getProjectPackages);
 }
 
+// the qualified names of the fixed instances whose ignored `editor` attribute was logged since the open project loaded
+const loggedSimxInstanceEditors = new Set<string>();
+
+/**
+ * Returns the key of the tab among `offered` that opens the fixed instance
+ * `instance` of the open project: the offered tab its `editor` attribute
+ * names, else, without the attribute, the one `getCreatorOpener` returns. An
+ * `editor` attribute it ignores is logged once per project load.
+ * @param instance the instance, as the API info gives it
+ * @param offered the keys of the tabs the editor offers the open project
+ * @param getCreatorOpener returns the key of the tab that creates the instances of the instance's type, when that tab opens the instance; called only for an instance without the attribute
+ */
+export function getProjectSimxInstanceOpener(instance: Pick<pxtc.SymbolInfo, "qName" | "attributes">, offered: string[], getCreatorOpener: () => string | undefined): string | undefined {
+    return findSimxInstanceOpener(instance, offered, getCreatorOpener, loggedSimxInstanceEditors);
+}
+
 // the GitHub extension, `owner/repo[/path]`, of the open project's package `id`, from its version spec; undefined for no id, or a package not from GitHub
 function getPackageExtension(id: string | undefined): string | undefined {
     return id ? getDependencyExtension(pkg.mainPkg?.deps[id]?._verspec) : undefined;
@@ -487,16 +504,18 @@ export function setFullscreen(enabled: boolean) {
 /**
  * Closes the open project to simulator extensions: removes every editor tab
  * frame, with the actions held for the tabs, forgets the ignored `creates`
- * claims and the unmet `simulator` dependencies logged for the project,
- * refuses the project-file, project-asset and compiled-program requests still
- * waiting for the project, compiled-program requests whose compile is running
- * included, with `PROJECT_CLOSED`, and ends every project-file and
- * project-asset subscription. Call before the simulator unloads, as the
- * project closes or another load begins.
+ * claims, the ignored fixed-instance `editor` attributes and the unmet
+ * `simulator` dependencies logged for the project, refuses the project-file,
+ * project-asset and compiled-program requests still waiting for the project,
+ * compiled-program requests whose compile is running included, with
+ * `PROJECT_CLOSED`, and ends every project-file and project-asset
+ * subscription. Call before the simulator unloads, as the project closes or
+ * another load begins.
  */
 export function closeSimxProject() {
     simxEditorHost?.close();
     loggedSimxClaims.clear();
+    loggedSimxInstanceEditors.clear();
     loggedSimxReferences.clear();
     openProject.close();
     projfsHost.close();

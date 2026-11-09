@@ -7,17 +7,23 @@ import * as pxteditor from "../../pxteditor";
 import { getTextAtTime, HistoryFile, parseHistoryFile, updateHistory } from "../../pxteditor/history";
 import {
     answerSimxEditorRequest,
-    findSimxInstanceCreator,
+    findSimxInstanceCreators,
+    findSimxInstanceOpener,
     getDependencyExtension,
-    getDependencyRepository,
     getProjectSimxEditors,
     getSimxEditorKeyOfMarker,
     getSimxEditorMarkerName,
     getSimxEditorRegistrations,
+    getSimxFrameTabs,
     isSimxInProject,
+    opensSimxInstance,
+    parseSimxInstanceEditor,
+    projectIncludesSimx,
     resolveSimxEditorLabel,
+    simxDependsOn,
     SimxEditorHost,
     SimxEditorRegistration,
+    SimxProjectPackage,
 } from "../../webapp/src/simxEditorHost";
 import {
     getEditorToggleLayout,
@@ -33,6 +39,7 @@ import {
     getSimxApiLevel as getSimxEditorApiLevel,
     hasEditorTab,
     SimxEditorSimulatorState,
+    SimxEditorTab,
 } from "../../pxtservices/simxeditor";
 import {
     addSimulatorThemeToFiles,
@@ -6074,6 +6081,7 @@ describe("simulator extension editor tab registrations", () => {
         return {
             editor: { index: "index.html", label: key + " label" },
             editorUrl: `https://sim.example/simx/${key}/-/index.html`,
+            simulatorKey: key,
             ...extra,
         };
     }
@@ -6115,12 +6123,7 @@ describe("simulator extension editor tab registrations", () => {
             "emptyvaluesorg/pxt-ext": { index: "index.html", label: { "en": "", "fr": "" } },
         };
         const keys = Object.keys(unnamed);
-        const warnings: unknown[][] = [];
-        class RecordingLogger extends pxt.ConsoleLogger {
-            warn(...args: unknown[]) { warnings.push(args); }
-        }
-        pxt.setLogger(new RecordingLogger());
-        try {
+        const warnings = recordWarnings(() => {
             for (let i = 0; i < 2; i++) {
                 const registrations = getSimxEditorRegistrations({
                     ...pxt.Util.mapMap(unnamed, (key, editor) => resolved(key, { editor })),
@@ -6128,9 +6131,7 @@ describe("simulator extension editor tab registrations", () => {
                 });
                 chai.expect(registrations.map(r => [r.key, r.label])).deep.equals([...keys.map(key => [key, key]), [EXT, EXT + " label"]]);
             }
-        } finally {
-            pxt.setLogger(new pxt.ConsoleLogger());
-        }
+        });
         chai.expect(warnings.length).equals(keys.length);
         chai.expect(keys.map(key => warnings.filter(w => w.join(" ").indexOf(key) >= 0).length)).deep.equals(keys.map(() => 1));
     });
@@ -6146,6 +6147,15 @@ describe("simulator extension editor tab registrations", () => {
         chai.expect(noIcon).deep.include({ icon: undefined, iconUrl: undefined });
     });
 
+    it("carries the key of the simulator frame a tab talks to, its own key when the driver resolved none", () => {
+        const registrations = getSimxEditorRegistrations({
+            [EXT]: resolved(EXT),
+            [OTHER]: resolved(OTHER, { simulatorKey: EXT }),
+            "nokeyorg/pxt-nokey": resolved("nokeyorg/pxt-nokey", { simulatorKey: undefined }),
+        });
+        chai.expect(registrations.map(r => [r.key, r.simulatorKey])).deep.equals([[EXT, EXT], [OTHER, EXT], ["nokeyorg/pxt-nokey", "nokeyorg/pxt-nokey"]]);
+    });
+
     it("carries the types a tab creates, as the driver resolved them", () => {
         const [creating, plain] = getSimxEditorRegistrations({
             [EXT]: resolved(EXT, { creates: ["ext.Thing", "ext.Other"] }),
@@ -6157,7 +6167,7 @@ describe("simulator extension editor tab registrations", () => {
 
     it("offers a project the tabs of the extensions it depends on, matching the key in any case", () => {
         const registrations = getSimxEditorRegistrations({ [EXT]: resolved(EXT), [OTHER]: resolved(OTHER) });
-        const keys = (deps: string[]) => getProjectSimxEditors(registrations, deps).map(r => r.key);
+        const keys = (deps: string[]) => getProjectSimxEditors(registrations, deps, () => { throw new Error("read the packages"); }).map(r => r.key);
         chai.expect(keys(["*", "github:SomeOrg/PXT-Ext#v1.0.0"])).deep.equals([EXT]);
         chai.expect(keys(["github:otherorg/pxt-other#abc", "github:someorg/pxt-ext"])).deep.equals([EXT, OTHER]);
         chai.expect(keys(["*", "file:../pxt-ext", "github:someorg/pxt-extended"])).deep.equals([]);
@@ -6189,7 +6199,7 @@ describe("simulator extension editor tab registrations", () => {
             "owner/repo/ext/gadget": resolved("owner/repo/ext/gadget"),
             [OTHER]: resolved(OTHER),
         });
-        const keys = (deps: string[]) => getProjectSimxEditors(registrations, deps).map(r => r.key);
+        const keys = (deps: string[]) => getProjectSimxEditors(registrations, deps, () => []).map(r => r.key);
         chai.expect(keys(["*", "github:owner/repo/ext/widget-core#v1"])).deep.equals([]);
         chai.expect(keys(["*", "github:owner/repo/ext/widget-core#v1", "github:Owner/Repo/ext/gadget#v1"])).deep.equals(["owner/repo/ext/gadget"]);
         chai.expect(keys(["github:owner/repo/ext/widget#v1", "github:owner/repo/ext/gadget#v1", "github:otherorg/pxt-other#abc"])).deep.equals(["owner/repo/ext/widget", "owner/repo/ext/gadget", OTHER]);
@@ -6229,63 +6239,119 @@ describe("simulator extension editor tab registrations", () => {
     });
 });
 
+// the packages of a project, each given by its version spec and those of its dependencies
+function packages(...entries: [string, (string | undefined)[]][]): SimxProjectPackage[] {
+    return entries.map(([spec, dependencies]) => ({ spec, dependencies }));
+}
+
+// runs `run` with a logger recording what it warns, and returns those warnings
+function recordWarnings(run: () => void): unknown[][] {
+    const warnings: unknown[][] = [];
+    class RecordingLogger extends pxt.ConsoleLogger {
+        warn(...args: unknown[]) { warnings.push(args); }
+    }
+    pxt.setLogger(new RecordingLogger());
+    try {
+        run();
+    } finally {
+        pxt.setLogger(new pxt.ConsoleLogger());
+    }
+    return warnings;
+}
+
+// a project whose reforg/pxt-ref depends on someorg/pxt-ext directly, and whose midorg/pxt-mid depends on it through reforg/pxt-ref
+const depending = packages(
+    ["github:midorg/pxt-mid#v1", ["github:reforg/pxt-ref#v1"]],
+    ["github:reforg/pxt-ref#v1", ["*", "github:someorg/pxt-ext#v2"]],
+    ["github:someorg/pxt-ext#v2", ["github:otherorg/pxt-other#v1"]],
+    ["github:otherorg/pxt-other#v1", []],
+);
+
 describe("simulator extension instance creators", () => {
     const TYPE = "ext.Thing";
+    const EXT = "someorg/pxt-ext";
+    const REF = "reforg/pxt-ref";
+    const MID = "midorg/pxt-mid";
+    const OTHER = "otherorg/pxt-other";
+    const included = ["github:someorg/pxt-ext#v2", "github:reforg/pxt-ref#v1", "github:midorg/pxt-mid#v1", "github:otherorg/pxt-other#v1"];
 
     function registrations(map: pxt.Map<string[] | undefined>): SimxEditorRegistration[] {
         return getSimxEditorRegistrations(pxt.Util.mapMap(map, (key, creates) => ({
             editor: { index: "index.html", label: key },
             editorUrl: `https://sim.example/simx/${key}/-/index.html`,
+            simulatorKey: key,
             creates,
         })));
     }
 
-    function find(regs: SimxEditorRegistration[], deps: string[], typeRepository: string | undefined, type = TYPE) {
-        const { creator, ignored } = findSimxInstanceCreator(getProjectSimxEditors(regs, deps), type, typeRepository);
-        return { creator: creator?.key, ignored };
+    function find(regs: SimxEditorRegistration[], deps: string[], typeExtension: string | undefined, type = TYPE, project: SimxProjectPackage[] = []) {
+        const { creators, ignored } = findSimxInstanceCreators(getProjectSimxEditors(regs, deps, () => []), type, typeExtension, () => project);
+        return { creators: creators.map(r => r.key), ignored };
     }
 
     it("is the registration claiming the type that the project includes, of the repository declaring the type", () => {
         const regs = registrations({ "someorg/pxt-ext/sub": [TYPE], "otherorg/pxt-other": [TYPE] });
-        chai.expect(find(regs, ["github:SomeOrg/PXT-Ext/sub#v1", "github:SomeOrg/PXT-Ext/makecode/vm#v1"], "someorg/pxt-ext")).deep.equals({ creator: "someorg/pxt-ext/sub", ignored: [] });
-        chai.expect(find(regs, ["github:SomeOrg/PXT-Ext/Sub"], "SomeOrg/PXT-Ext").creator).equals("someorg/pxt-ext/sub");
-        chai.expect(find(regs, ["github:someorg/pxt-ext/makecode/vm#v1"], "someorg/pxt-ext").creator).equals(undefined);
+        chai.expect(find(regs, ["github:SomeOrg/PXT-Ext/sub#v1", "github:SomeOrg/PXT-Ext/makecode/vm#v1"], "someorg/pxt-ext")).deep.equals({ creators: ["someorg/pxt-ext/sub"], ignored: [] });
+        chai.expect(find(regs, ["github:SomeOrg/PXT-Ext/Sub"], "SomeOrg/PXT-Ext").creators).deep.equals(["someorg/pxt-ext/sub"]);
+        chai.expect(find(regs, ["github:someorg/pxt-ext/makecode/vm#v1"], "someorg/pxt-ext").creators).deep.equals([]);
     });
 
     it("is none for a type no included registration claims", () => {
         const regs = registrations({ "someorg/pxt-ext": ["ext.Other"], "thirdorg/pxt-third": undefined });
-        chai.expect(find(regs, ["github:someorg/pxt-ext", "github:thirdorg/pxt-third"], "someorg/pxt-ext")).deep.equals({ creator: undefined, ignored: [] });
-        chai.expect(find(registrations({ "someorg/pxt-ext": [TYPE] }), ["github:otherorg/pxt-other"], "someorg/pxt-ext").creator).equals(undefined);
+        chai.expect(find(regs, ["github:someorg/pxt-ext", "github:thirdorg/pxt-third"], "someorg/pxt-ext")).deep.equals({ creators: [], ignored: [] });
+        chai.expect(find(registrations({ "someorg/pxt-ext": [TYPE] }), ["github:otherorg/pxt-other"], "someorg/pxt-ext").creators).deep.equals([]);
     });
 
-    it("ignores a claim on a type another repository, or the project's own code, declares", () => {
+    it("ignores a claim on a type declared by an extension the claimant neither belongs to nor depends on, or by the project's own code", () => {
         const regs = registrations({ "otherorg/pxt-other": [TYPE], "someorg/pxt-ext": [TYPE] });
         const deps = ["github:otherorg/pxt-other", "github:someorg/pxt-ext"];
-        chai.expect(find(regs, deps, "someorg/pxt-ext")).deep.equals({
-            creator: "someorg/pxt-ext",
-            ignored: [{ key: "otherorg/pxt-other", reason: "OTHER_REPOSITORY" }],
+        // someorg/pxt-ext depends on otherorg/pxt-other, not the other way round
+        const project = packages(["github:someorg/pxt-ext", ["github:otherorg/pxt-other"]], ["github:otherorg/pxt-other", []]);
+        chai.expect(find(regs, deps, "someorg/pxt-ext", TYPE, project)).deep.equals({
+            creators: ["someorg/pxt-ext"],
+            ignored: [{ key: "otherorg/pxt-other", reason: "UNRELATED_EXTENSION" }],
         });
-        chai.expect(find(regs, deps, undefined)).deep.equals({
-            creator: undefined,
-            ignored: [{ key: "otherorg/pxt-other", reason: "OTHER_REPOSITORY" }, { key: "someorg/pxt-ext", reason: "OTHER_REPOSITORY" }],
+        chai.expect(find(regs, deps, undefined, TYPE, project)).deep.equals({
+            creators: [],
+            ignored: [{ key: "otherorg/pxt-other", reason: "UNRELATED_EXTENSION" }, { key: "someorg/pxt-ext", reason: "UNRELATED_EXTENSION" }],
         });
     });
 
-    it("is the first in registration order of two registrations claiming one type, the other ignored", () => {
+    it("is a registration whose extension depends on the type's declaring extension, directly or through other extensions, and none whose extension does not", () => {
+        chai.expect(find(registrations({ [REF]: [TYPE] }), included, "SomeOrg/PXT-Ext", TYPE, depending)).deep.equals({ creators: [REF], ignored: [] });
+        chai.expect(find(registrations({ [MID]: [TYPE] }), included, EXT, TYPE, depending)).deep.equals({ creators: [MID], ignored: [] });
+        chai.expect(find(registrations({ [REF]: [TYPE] }), included, "someorg/pxt-ext/sub", TYPE, depending)).deep.equals({
+            creators: [],
+            ignored: [{ key: REF, reason: "UNRELATED_EXTENSION" }],
+        });
+        chai.expect(find(registrations({ [EXT]: [TYPE] }), included, REF, TYPE, depending)).deep.equals({
+            creators: [],
+            ignored: [{ key: EXT, reason: "UNRELATED_EXTENSION" }],
+        });
+    });
+
+    it("is every honored claimant, in registration order", () => {
+        chai.expect(find(registrations({ [REF]: [TYPE], [EXT]: [TYPE] }), included, EXT, TYPE, depending)).deep.equals({ creators: [REF, EXT], ignored: [] });
+        chai.expect(find(registrations({ [EXT]: [TYPE], [OTHER]: [TYPE], [MID]: [TYPE] }), included, EXT, TYPE, depending)).deep.equals({
+            creators: [EXT, MID],
+            ignored: [{ key: OTHER, reason: "UNRELATED_EXTENSION" }],
+        });
         const regs = registrations({ "someorg/pxt-ext/b": [TYPE], "someorg/pxt-ext/a": ["ext.Other", TYPE] });
         const deps = ["github:someorg/pxt-ext/a#v1", "github:someorg/pxt-ext/b#v1"];
-        chai.expect(find(regs, deps, "someorg/pxt-ext")).deep.equals({
-            creator: "someorg/pxt-ext/b",
-            ignored: [{ key: "someorg/pxt-ext/a", reason: "CLAIMED_EARLIER" }],
-        });
-        chai.expect(find(regs, deps, "someorg/pxt-ext", "ext.Other").creator).equals("someorg/pxt-ext/a");
-        chai.expect(find(regs, ["github:someorg/pxt-ext/a#v1"], "someorg/pxt-ext")).deep.equals({ creator: "someorg/pxt-ext/a", ignored: [] });
+        chai.expect(find(regs, deps, "someorg/pxt-ext")).deep.equals({ creators: ["someorg/pxt-ext/b", "someorg/pxt-ext/a"], ignored: [] });
+        chai.expect(find(regs, deps, "someorg/pxt-ext", "ext.Other").creators).deep.equals(["someorg/pxt-ext/a"]);
     });
 
-    it("reads the repository of a dependency from its GitHub version spec only", () => {
-        chai.expect(getDependencyRepository("github:SomeOrg/pxt-ext/makecode/vm#v1.0.0")).equals("SomeOrg/pxt-ext");
-        for (const spec of ["*", "file:../pxt-ext", "workspace:abc", "", undefined])
-            chai.expect(getDependencyRepository(spec), spec).equals(undefined);
+    it("reads the packages at most once, and only to decide a dependency", () => {
+        let reads = 0;
+        const read = () => {
+            reads++;
+            return depending;
+        };
+        findSimxInstanceCreators(registrations({ [EXT]: [TYPE], "someorg/pxt-ext/sub": [TYPE] }), TYPE, EXT, read);
+        chai.expect(reads).equals(0);
+        findSimxInstanceCreators(registrations({ [REF]: [TYPE], [MID]: [TYPE], [OTHER]: [TYPE] }), TYPE, EXT, read);
+        chai.expect(reads).equals(1);
     });
 
     it("reads the extension of a dependency from its GitHub version spec only", () => {
@@ -6294,6 +6360,150 @@ describe("simulator extension instance creators", () => {
         chai.expect(getDependencyExtension("github:someorg/pxt-ext")).equals("someorg/pxt-ext");
         for (const spec of ["*", "file:../pxt-ext", "workspace:abc", "", undefined])
             chai.expect(getDependencyExtension(spec), spec).equals(undefined);
+    });
+});
+
+describe("simulator extension instance openers", () => {
+    const EXT = "someorg/pxt-ext";
+    const REF = "reforg/pxt-ref";
+    const MID = "midorg/pxt-mid";
+    const offered = [EXT, REF];
+    const MALFORMED = [
+        "", "true", "simx", "simx:", ":reforg/pxt-ref", "simx:pxt-ref",
+        "simx:reforg/pxt-ref#v1", "simx: reforg/pxt-ref", "simx:github:reforg/pxt-ref", "simx:https://github.com/reforg/pxt-ref", "simx:reforg/pxt-ref/a:b",
+    ];
+    const UNKNOWN_KIND = ["tab:reforg/pxt-ref", "SIMX:reforg/pxt-ref"];
+
+    // a fixed instance `ns.<name>` whose `editor` attribute is `editor`, absent when undefined
+    function instance(name: string, editor?: string): Pick<pxtc.SymbolInfo, "qName" | "attributes" | "pkg"> {
+        const attributes = { fixedInstance: true } as pxtc.CommentAttrs;
+        if (editor !== undefined) attributes.editor = editor;
+        return { qName: `ns.${name}`, attributes };
+    }
+
+    it("opens an instance declared in the creator's folder, or in that of the type's declaring repository when the creator depends on it, directly or not", () => {
+        for (const fileName of ["midorg/pxt-mid/things.g.ts", "someorg/pxt-ext/things.g.ts", "someorg/pxt-ext/sub/things.g.ts"])
+            chai.expect(opensSimxInstance(MID, { pkg: undefined, fileName }, EXT, () => depending), fileName).equals(true);
+        chai.expect(opensSimxInstance(REF, { pkg: undefined, fileName: "someorg/pxt-ext/things.g.ts" }, EXT, () => depending)).equals(true);
+        chai.expect(opensSimxInstance(EXT, { pkg: undefined, fileName: "someorg/pxt-ext/things.g.ts" }, undefined, () => [])).equals(true);
+    });
+
+    it("does not open an instance declared in the folder of another repository the creator depends on", () => {
+        // reforg/pxt-ref depends on someorg/pxt-ext, which declares the type, and on otherorg/pxt-other
+        const project = packages(
+            ["github:reforg/pxt-ref#v1", ["github:someorg/pxt-ext#v2", "github:otherorg/pxt-other#v1"]],
+            ["github:someorg/pxt-ext#v2", []],
+            ["github:otherorg/pxt-other#v1", []],
+        );
+        chai.expect(opensSimxInstance(REF, { pkg: undefined, fileName: "otherorg/pxt-other/things.g.ts" }, EXT, () => project)).equals(false);
+        chai.expect(opensSimxInstance(REF, { pkg: undefined, fileName: "someorg/pxt-ext/things.g.ts" }, EXT, () => project)).equals(true);
+    });
+
+    it("does not open an instance of a type whose declaring extension the creator does not depend on, outside the folders, or declared by a package", () => {
+        chai.expect(opensSimxInstance(EXT, { pkg: undefined, fileName: "reforg/pxt-ref/things.g.ts" }, REF, () => depending)).equals(false);
+        chai.expect(opensSimxInstance(REF, { pkg: undefined, fileName: "someorg/pxt-ext/things.g.ts" }, "SomeOrg/PXT-Ext/sub", () => depending)).equals(false);
+        chai.expect(opensSimxInstance(REF, { pkg: undefined, fileName: "thirdorg/pxt-third/things.g.ts" }, EXT, () => depending)).equals(false);
+        chai.expect(opensSimxInstance(REF, { pkg: undefined, fileName: "main.ts" }, EXT, () => depending)).equals(false);
+        chai.expect(opensSimxInstance(REF, { pkg: "ext", fileName: "someorg/pxt-ext/things.g.ts" }, EXT, () => depending)).equals(false);
+        chai.expect(opensSimxInstance(REF, { pkg: undefined, fileName: "someorg/pxt-ext/things.g.ts" }, undefined, () => depending)).equals(false);
+        chai.expect(opensSimxInstance(REF, { pkg: undefined, fileName: "someorg/pxt-ext/things.g.ts" }, EXT, () => [])).equals(false);
+    });
+
+    it("reads the packages only for an instance in the folder of the type's declaring repository and not the creator's", () => {
+        let reads = 0;
+        const read = () => {
+            reads++;
+            return depending;
+        };
+        opensSimxInstance(REF, { pkg: undefined, fileName: "reforg/pxt-ref/things.g.ts" }, EXT, read);
+        opensSimxInstance(REF, { pkg: undefined, fileName: "otherorg/pxt-other/things.g.ts" }, EXT, read);
+        chai.expect(reads).equals(0);
+        opensSimxInstance(REF, { pkg: undefined, fileName: "someorg/pxt-ext/things.g.ts" }, EXT, read);
+        chai.expect(reads).equals(1);
+    });
+
+    it("keeps the attribute verbatim when parsing a declaration's comment", () => {
+        const attributes = pxtc.parseCommentString(`//% fixedInstance block="chaser" editor="simx:owner/repo/path"`);
+        chai.expect(attributes.editor).equals("simx:owner/repo/path");
+        chai.expect(pxtc.parseCommentString(`//% fixedInstance editor="simx:owner/repo"`).editor).equals("simx:owner/repo");
+    });
+
+    it("reads a simx key, split at the first colon", () => {
+        chai.expect(parseSimxInstanceEditor("simx:owner/repo/path")).deep.equals({ kind: "simx", id: "owner/repo/path" });
+        chai.expect(parseSimxInstanceEditor("simx:Owner/Repo")).deep.equals({ kind: "simx", id: "Owner/Repo" });
+        chai.expect(parseSimxInstanceEditor(undefined)).equals(undefined);
+    });
+
+    it("tells a malformed value from an unknown kind", () => {
+        chai.expect(MALFORMED.map(parseSimxInstanceEditor)).deep.equals(MALFORMED.map(() => ({ reason: "MALFORMED" })));
+        chai.expect(UNKNOWN_KIND.map(parseSimxInstanceEditor)).deep.equals(UNKNOWN_KIND.map(() => ({ reason: "UNKNOWN_KIND" })));
+    });
+
+    it("opens an instance naming an offered key in that key's tab, whatever creates its type, without asking the creator rule", () => {
+        let asked = 0;
+        const creator = () => {
+            asked++;
+            return EXT;
+        };
+        chai.expect(findSimxInstanceOpener(instance("chaser", `simx:${REF}`), offered, creator, new Set(), true)).equals(REF);
+        chai.expect(findSimxInstanceOpener(instance("chaser", "simx:RefOrg/PXT-Ref"), offered, creator, new Set(), true)).equals(REF);
+        chai.expect(findSimxInstanceOpener(instance("chaser", `simx:${REF}`), offered, () => undefined, new Set(), true)).equals(REF);
+        chai.expect(asked).equals(0);
+    });
+
+    it("opens nothing for an instance naming a key whose tab is not offered, logging nothing", () => {
+        const warnings = recordWarnings(() => {
+            chai.expect(findSimxInstanceOpener(instance("chaser", `simx:${REF}`), [EXT], () => EXT, new Set(), true)).equals(undefined);
+            chai.expect(findSimxInstanceOpener(instance("chaser", "simx:thirdorg/pxt-third"), offered, () => EXT, new Set(), true)).equals(undefined);
+        });
+        chai.expect(warnings.length).equals(0);
+    });
+
+    it("opens an instance with a malformed value or an unknown kind nowhere, logging each instance once with its code", () => {
+        const values = [...MALFORMED, ...UNKNOWN_KIND];
+        const logged = new Set<string>();
+        const warnings = recordWarnings(() => {
+            for (let i = 0; i < 2; i++)
+                values.forEach((value, n) => chai.expect(findSimxInstanceOpener(instance(`i${n}`, value), offered, () => EXT, logged, true), value).equals(undefined));
+        });
+        chai.expect(warnings.length).equals(values.length);
+        const codes = values.map((value, n) => warnings.filter(w => w.join(" ").indexOf(`ns.i${n}:`) >= 0).map(w => /\((\w+)\)/.exec(w.join(" "))?.[1]));
+        chai.expect(codes).deep.equals([...MALFORMED.map(() => ["MALFORMED"]), ...UNKNOWN_KIND.map(() => ["UNKNOWN_KIND"])]);
+    });
+
+    it("opens nothing for an instance naming an offered tab when no offered tab creates its type, logging each instance once with its code", () => {
+        const logged = new Set<string>();
+        const warnings = recordWarnings(() => {
+            for (let i = 0; i < 2; i++) {
+                chai.expect(findSimxInstanceOpener(instance("chaser", `simx:${REF}`), offered, () => EXT, logged, false)).equals(undefined);
+                chai.expect(findSimxInstanceOpener(instance("runner", `simx:${EXT}`), offered, () => EXT, logged, false)).equals(undefined);
+                chai.expect(findSimxInstanceOpener(instance("walker", "simx:thirdorg/pxt-third"), offered, () => EXT, logged, false)).equals(undefined);
+            }
+        });
+        chai.expect(warnings.map(w => /fixed instance (\S+): .*\((\w+)\)/.exec(w.join(" "))?.slice(1))).deep.equals([["ns.chaser", "NO_CREATOR"], ["ns.runner", "NO_CREATOR"]]);
+    });
+
+    it("opens nothing, logging nothing, for an instance an extension declares, whatever its attribute names", () => {
+        const warnings = recordWarnings(() => {
+            chai.expect(findSimxInstanceOpener({ ...instance("chaser", `simx:${REF}`), pkg: "ref" }, offered, () => EXT, new Set(), true)).equals(undefined);
+            chai.expect(findSimxInstanceOpener({ ...instance("chaser", `simx:${REF}`), pkg: "ref" }, offered, () => EXT, new Set(), false)).equals(undefined);
+        });
+        chai.expect(warnings.length).equals(0);
+    });
+
+    it("opens an instance without the attribute in the first claimant, in registration order, whose folder rule opens it", () => {
+        // returns the tab that opens the instance declared in `fileName` when the type's claimants are `claimants`
+        const opener = (claimants: string[], fileName: string) => findSimxInstanceOpener(instance("chaser"), offered,
+            () => claimants.find(key => opensSimxInstance(key, { pkg: undefined, fileName }, EXT, () => depending)), new Set(), true);
+        chai.expect(opener([EXT, REF], "reforg/pxt-ref/things.g.ts")).equals(REF);
+        chai.expect(opener([EXT, REF], "someorg/pxt-ext/things.g.ts")).equals(EXT);
+        chai.expect(opener([REF, EXT], "someorg/pxt-ext/things.g.ts")).equals(REF);
+        chai.expect(opener([EXT, REF], "main.ts")).equals(undefined);
+    });
+
+    it("opens an instance without the attribute where the creator rule does", () => {
+        chai.expect(findSimxInstanceOpener(instance("chaser"), offered, () => EXT, new Set(), true)).equals(EXT);
+        chai.expect(findSimxInstanceOpener(instance("chaser"), offered, () => undefined, new Set(), true)).equals(undefined);
     });
 });
 
@@ -6306,54 +6516,54 @@ describe("fixed-instance dropdown options", () => {
     }
 
     it("appends a separator and one trailing create entry, with the reserved value, when only the create entry is offered", () => {
-        const options = getInstanceDropdownOptions(instances, undefined, "create", "empty");
+        const options = getInstanceDropdownOptions(instances, undefined, [["create", "k"]], "empty");
         chai.expect(options.slice(0, instances.length)).deep.equals(instances);
-        chai.expect(values(options)).deep.equals(["ns.a", "ns.b", "separator", CREATE_INSTANCE_OPTION_VALUE]);
+        chai.expect(values(options)).deep.equals(["ns.a", "ns.b", "separator", CREATE_INSTANCE_OPTION_VALUE + "k"]);
     });
 
     it("appends a separator and one trailing edit entry, with the reserved value, when only the edit entry is offered", () => {
-        const options = getInstanceDropdownOptions(instances, "edit", undefined, "empty");
+        const options = getInstanceDropdownOptions(instances, "edit", [], "empty");
         chai.expect(options.slice(0, instances.length)).deep.equals(instances);
         chai.expect(values(options)).deep.equals(["ns.a", "ns.b", "separator", OPEN_INSTANCE_OPTION_VALUE]);
     });
 
     it("places the edit entry before the create entry, after one separator, when both are offered", () => {
-        const options = getInstanceDropdownOptions(instances, "edit", "create", "empty");
+        const options = getInstanceDropdownOptions(instances, "edit", [["create", "k"]], "empty");
         chai.expect(options.slice(0, instances.length)).deep.equals(instances);
-        chai.expect(values(options)).deep.equals(["ns.a", "ns.b", "separator", OPEN_INSTANCE_OPTION_VALUE, CREATE_INSTANCE_OPTION_VALUE]);
+        chai.expect(values(options)).deep.equals(["ns.a", "ns.b", "separator", OPEN_INSTANCE_OPTION_VALUE, CREATE_INSTANCE_OPTION_VALUE + "k"]);
     });
 
     it("lists the instances alone, with no separator, when neither entry is offered", () => {
-        chai.expect(getInstanceDropdownOptions(instances, undefined, undefined, "empty")).deep.equals(instances);
+        chai.expect(getInstanceDropdownOptions(instances, undefined, [], "empty")).deep.equals(instances);
     });
 
     it("lists the command entries alone, with no separator, when there are no instances", () => {
-        chai.expect(values(getInstanceDropdownOptions([], undefined, "create", "empty"))).deep.equals([CREATE_INSTANCE_OPTION_VALUE]);
-        chai.expect(values(getInstanceDropdownOptions([], "edit", "create", "empty"))).deep.equals([OPEN_INSTANCE_OPTION_VALUE, CREATE_INSTANCE_OPTION_VALUE]);
+        chai.expect(values(getInstanceDropdownOptions([], undefined, [["create", "k"]], "empty"))).deep.equals([CREATE_INSTANCE_OPTION_VALUE + "k"]);
+        chai.expect(values(getInstanceDropdownOptions([], "edit", [["create", "k"]], "empty"))).deep.equals([OPEN_INSTANCE_OPTION_VALUE, CREATE_INSTANCE_OPTION_VALUE + "k"]);
     });
 
     it("tells the reserved values from instance values", () => {
-        for (const value of [CREATE_INSTANCE_OPTION_VALUE, OPEN_INSTANCE_OPTION_VALUE, NO_INSTANCE_OPTION_VALUE])
+        for (const value of [CREATE_INSTANCE_OPTION_VALUE, CREATE_INSTANCE_OPTION_VALUE + "someorg/pxt-ext", OPEN_INSTANCE_OPTION_VALUE, NO_INSTANCE_OPTION_VALUE])
             chai.expect(isReservedInstanceValue(value), value).equals(true);
         for (const value of ["ns.a", "a", "", "@other@"])
             chai.expect(isReservedInstanceValue(value), value).equals(false);
     });
 
     it("lists one entry, with the reserved value, when there are no instances and neither entry is offered", () => {
-        chai.expect(values(getInstanceDropdownOptions([], undefined, undefined, "empty"))).deep.equals([NO_INSTANCE_OPTION_VALUE]);
+        chai.expect(values(getInstanceDropdownOptions([], undefined, [], "empty"))).deep.equals([NO_INSTANCE_OPTION_VALUE]);
     });
 
     it("never lists the entry saying there are no instances beside an instance or a command entry", () => {
         for (const listed of [instances, []])
             for (const editText of ["edit", undefined])
-                for (const createText of ["create", undefined]) {
-                    if (!listed.length && editText === undefined && createText === undefined) continue;
-                    chai.expect(values(getInstanceDropdownOptions(listed, editText, createText, "empty"))).to.not.include(NO_INSTANCE_OPTION_VALUE);
+                for (const creates of [[["create", "k"]] as [string, string][], []]) {
+                    if (!listed.length && editText === undefined && !creates.length) continue;
+                    chai.expect(values(getInstanceDropdownOptions(listed, editText, creates, "empty"))).to.not.include(NO_INSTANCE_OPTION_VALUE);
                 }
     });
 
     it("never changes the list it was given", () => {
-        getInstanceDropdownOptions(instances, "edit", "create", "empty");
+        getInstanceDropdownOptions(instances, "edit", [["create", "k"]], "empty");
         chai.expect(instances.length).equals(2);
     });
 
@@ -6451,6 +6661,44 @@ describe("fixed-instance dropdown options", () => {
         chai.expect(asked).deep.equals([]);
     });
 
+    // runs `run` with the editor listing `creators` for every type and recording what it is asked to create
+    function withCreators(creators: { id: string, label: string }[], run: (asked: [string, string][]) => void) {
+        const asked: [string, string][] = [];
+        const { getInstanceCreators, createInstance } = pxt.react;
+        pxt.react.getInstanceCreators = () => creators;
+        pxt.react.createInstance = (typeQName, creatorId) => asked.push([typeQName, creatorId]);
+        try {
+            run(asked);
+        } finally {
+            pxt.react.getInstanceCreators = getInstanceCreators;
+            pxt.react.createInstance = createInstance;
+        }
+    }
+
+    it("lists one entry asking for a new instance per creator, each carrying its id, naming the creator only when there are several", () => {
+        const blocksInfo = thingBlocksInfo([instanceSymbol("a", "ns.Thing")]);
+        const commands = (field: FieldInstanceDropdown) => field.getOptions(false).slice(2).map(o => o === "separator" ? o : [o[0], o[1]]);
+        withCreators([{ id: "someorg/pxt-ext", label: "Ext" }], () => {
+            chai.expect(commands(instanceField({ getBlocksInfo: () => blocksInfo }))).deep.equals([[lf("New {0}...", "thing"), CREATE_INSTANCE_OPTION_VALUE + "someorg/pxt-ext"]]);
+        });
+        withCreators([{ id: "someorg/pxt-ext", label: "Ext" }, { id: "reforg/pxt-ref", label: "Designer" }], () => {
+            chai.expect(commands(instanceField({ getBlocksInfo: () => blocksInfo }))).deep.equals([
+                [lf("New {0} in {1}...", "thing", "Ext"), CREATE_INSTANCE_OPTION_VALUE + "someorg/pxt-ext"],
+                [lf("New {0} in {1}...", "thing", "Designer"), CREATE_INSTANCE_OPTION_VALUE + "reforg/pxt-ref"],
+            ]);
+        });
+    });
+
+    it("asks the picked creator to create an instance, keeping the field's value", () => {
+        const blocksInfo = thingBlocksInfo([instanceSymbol("a", "ns.Thing")]);
+        withCreators([{ id: "someorg/pxt-ext", label: "Ext" }, { id: "reforg/pxt-ref", label: "Designer" }], asked => {
+            const field = new PickableInstanceField("", { type: "ns.Thing", blocksInfo: undefined, getBlocksInfo: () => blocksInfo });
+            field.pick(CREATE_INSTANCE_OPTION_VALUE + "reforg/pxt-ref");
+            chai.expect(asked).deep.equals([["ns.Thing", "reforg/pxt-ref"]]);
+            chai.expect(field.getValue()).equals("ns.a");
+        });
+    });
+
     it("lists the options captured when the field was built while the live API info is undefined", () => {
         chai.expect(openedValues({ data: [["old", "ns.old"]], getBlocksInfo: () => undefined })).deep.equals(["ns.old"]);
     });
@@ -6489,6 +6737,36 @@ describe("fixed-instance dropdown options", () => {
         ]);
         chai.expect(values(getFixedInstanceDropdownOptions(blocksInfo, "ns.Thing", undefined, new StubImageConverter()))).deep.equals(["ns.special"]);
     });
+
+    it("offers the entry asking to edit the instance the field holds as the instance's editor attribute decides, else as the creator rule does", () => {
+        const EXT = "someorg/pxt-ext";
+        const REF = "reforg/pxt-ref";
+        // whether the field holding the instance `ns.chaser`, whose `editor` attribute is `editor`, offers the entry, with the tabs `offered` and the creator rule choosing `creator`
+        const offersEdit = (editor: string | undefined, offered: string[], creator: string | undefined) => {
+            const attributes = (editor === undefined ? {} : { editor }) as pxtc.CommentAttrs;
+            const blocksInfo = thingBlocksInfo([instanceSymbol("chaser", "ns.Thing", attributes)]);
+            const { canOpenInstance } = pxt.react;
+            pxt.react.canOpenInstance = qName => !!findSimxInstanceOpener(blocksInfo.apis.byQName[qName], offered, () => creator, new Set(), true);
+            try {
+                return openedValues({ getBlocksInfo: () => blocksInfo }).includes(OPEN_INSTANCE_OPTION_VALUE);
+            } finally {
+                pxt.react.canOpenInstance = canOpenInstance;
+            }
+        };
+        const cases: [string | undefined, string[], string | undefined][] = [
+            [`simx:${REF}`, [EXT, REF], EXT],
+            [`simx:${REF}`, [EXT, REF], undefined],
+            [`simx:${REF}`, [EXT], EXT],
+            ["simx:", [EXT, REF], EXT],
+            ["tab:reforg/pxt-ref", [EXT, REF], EXT],
+            [undefined, [EXT, REF], EXT],
+            [undefined, [EXT, REF], undefined],
+        ];
+        let offers: boolean[];
+        const warnings = recordWarnings(() => offers = cases.map(c => offersEdit(...c)));
+        chai.expect(offers).deep.equals([true, true, false, false, false, true, false]);
+        chai.expect(warnings.length).equals(2);
+    });
 });
 
 describe("session-only files", () => {
@@ -6519,21 +6797,224 @@ describe("session-only files", () => {
 });
 
 describe("simulator extension editor tab open requests", () => {
+    const EXT = "someorg/pxt-ext";
+    const REF = "reforg/pxt-ref";
+    const EXT_TAB: SimxEditorTab = { key: EXT, label: "Ext" };
+    const REF_TAB: SimxEditorTab = { key: REF, label: "Ref", iconUrl: `https://sim.example/simx/${REF}/-/icon.svg` };
+
+    function answer(msg: object, tabs: SimxEditorTab[], opened: string[] = [], shown = true) {
+        return answerSimxEditorRequest(EXT, { type: "simxeditor", id: "4", ...msg }, tabs, key => {
+            opened.push(key);
+            return shown;
+        });
+    }
+
     it("shows the tab and acknowledges the request", () => {
         const opened: string[] = [];
-        chai.expect(answerSimxEditorRequest("someorg/pxt-ext", { type: "simxeditor", subtype: "open", id: "4" }, key => { opened.push(key); return true; }))
-            .deep.equals({ type: "simxeditor", id: "4", subtype: "ack" });
-        chai.expect(opened).deep.equals(["someorg/pxt-ext"]);
+        chai.expect(answer({ subtype: "open" }, [EXT_TAB], opened)).deep.equals({ type: "simxeditor", id: "4", subtype: "ack" });
+        chai.expect(opened).deep.equals([EXT]);
     });
 
     it("refuses with UNAVAILABLE when the editor offers no such tab here", () => {
-        const reply = answerSimxEditorRequest("someorg/pxt-ext", { type: "simxeditor", subtype: "open", id: "4" }, () => false);
-        chai.expect(reply).deep.include({ type: "simxeditor", id: "4", subtype: "error", code: "UNAVAILABLE" });
+        chai.expect(answer({ subtype: "open" }, [EXT_TAB], [], false)).deep.include({ type: "simxeditor", id: "4", subtype: "error", code: "UNAVAILABLE" });
+        chai.expect(answer({ subtype: "open", key: REF }, [EXT_TAB, REF_TAB], [], false)).deep.include({ subtype: "error", code: "UNAVAILABLE" });
     });
 
     it("refuses an unknown request with INVALID_REQUEST, showing nothing", () => {
-        const reply = answerSimxEditorRequest("someorg/pxt-ext", { type: "simxeditor", subtype: "close", id: 5 }, () => { throw new Error("opened"); });
+        const reply = answerSimxEditorRequest(EXT, { type: "simxeditor", subtype: "close", id: 5 }, [EXT_TAB], () => { throw new Error("opened"); });
         chai.expect(reply).deep.include({ type: "simxeditor", id: undefined, subtype: "error", code: "INVALID_REQUEST" });
+    });
+
+    it("refuses with INVALID_REQUEST, showing nothing, an open request whose key is not a string", () => {
+        const opened: string[] = [];
+        chai.expect(answer({ subtype: "open", key: 7 }, [EXT_TAB, REF_TAB], opened)).deep.include({ type: "simxeditor", id: "4", subtype: "error", code: "INVALID_REQUEST" });
+        chai.expect(opened).deep.equals([]);
+    });
+
+    it("shows the tab an open request names, the frame's own or one talking to the frame", () => {
+        const opened: string[] = [];
+        chai.expect(answer({ subtype: "open", key: EXT }, [EXT_TAB, REF_TAB], opened)).deep.equals({ type: "simxeditor", id: "4", subtype: "ack" });
+        chai.expect(answer({ subtype: "open", key: REF }, [EXT_TAB, REF_TAB], opened)).deep.equals({ type: "simxeditor", id: "4", subtype: "ack" });
+        chai.expect(answer({ subtype: "open" }, [EXT_TAB, REF_TAB], opened)).deep.equals({ type: "simxeditor", id: "4", subtype: "ack" });
+        chai.expect(opened).deep.equals([EXT, REF, EXT]);
+    });
+
+    it("refuses with INVALID_REQUEST, showing nothing and logging once, an open request whose key matches two tabs differing only in case", () => {
+        const opened: string[] = [];
+        const twin: SimxEditorTab = { key: "RefOrg/PXT-Ref", label: "Ref twin" };
+        let replies: unknown[];
+        const warnings = recordWarnings(() => replies = [0, 1].map(() => answer({ subtype: "open", key: REF }, [EXT_TAB, REF_TAB, twin], opened)));
+        replies.forEach(reply => chai.expect(reply).deep.include({ type: "simxeditor", id: "4", subtype: "error", code: "INVALID_REQUEST" }));
+        chai.expect(warnings.length).equals(1);
+        chai.expect(opened).deep.equals([]);
+    });
+
+    it("shows the tab an open request names in another case by the key it is registered with", () => {
+        const opened: string[] = [];
+        chai.expect(answer({ subtype: "open", key: "RefOrg/PXT-Ref" }, [EXT_TAB, REF_TAB], opened)).deep.equals({ type: "simxeditor", id: "4", subtype: "ack" });
+        chai.expect(answer({ subtype: "open", key: "SOMEORG/pxt-ext" }, [EXT_TAB, REF_TAB], opened)).deep.equals({ type: "simxeditor", id: "4", subtype: "ack" });
+        chai.expect(opened).deep.equals([REF, EXT]);
+    });
+
+    it("refuses with PERMISSION_DENIED, showing nothing, an open request for a tab that does not talk to the frame", () => {
+        const opened: string[] = [];
+        chai.expect(answer({ subtype: "open", key: "otherorg/pxt-other" }, [EXT_TAB, REF_TAB], opened)).deep.include({ type: "simxeditor", id: "4", subtype: "error", code: "PERMISSION_DENIED" });
+        chai.expect(answer({ subtype: "open" }, [REF_TAB], opened)).deep.include({ subtype: "error", code: "PERMISSION_DENIED" });
+        chai.expect(opened).deep.equals([]);
+    });
+
+    it("answers a tabs request with the tabs that talk to the frame, possibly none, showing nothing", () => {
+        const opened: string[] = [];
+        chai.expect(answer({ subtype: "tabs" }, [EXT_TAB, REF_TAB], opened)).deep.equals({ type: "simxeditor", id: "4", subtype: "tabs", tabs: [EXT_TAB, REF_TAB] });
+        chai.expect(answer({ subtype: "tabs" }, [], opened)).deep.equals({ type: "simxeditor", id: "4", subtype: "tabs", tabs: [] });
+        chai.expect(opened).deep.equals([]);
+    });
+});
+
+describe("simulator extension shared simulator frames", () => {
+    const EXT = "someorg/pxt-ext";
+    const REF = "reforg/pxt-ref";
+    const MID = "midorg/pxt-mid";
+
+    // a registration as the driver resolves one whose tab talks to the simulator frame of `simulatorKey`
+    function tab(key: string, simulatorKey = key, extra: Partial<SimxEditorRegistration> = {}): SimxEditorRegistration {
+        return { key, label: key, url: `https://sim.example/simx/${key}/-/index.html`, simulatorKey, ...extra };
+    }
+
+    describe("dependencies", () => {
+        it("finds a direct dependency, by the extension each key names", () => {
+            const project = packages(
+                ["file:.", ["github:reforg/pxt-ref#v1"]],
+                ["github:reforg/pxt-ref#v1", ["*", "github:someorg/pxt-ext#v2"]],
+                ["github:someorg/pxt-ext#v2", ["*"]],
+                ["*", []],
+            );
+            chai.expect(simxDependsOn(project, REF, EXT)).equals(true);
+            chai.expect(simxDependsOn(project, EXT, REF)).equals(false);
+            chai.expect(simxDependsOn(project, REF, "someorg/pxt-ext/sub")).equals(false);
+        });
+
+        it("finds a dependency through other packages", () => {
+            const project = packages(
+                ["github:reforg/pxt-ref#v1", ["github:midorg/pxt-mid#v1"]],
+                ["github:midorg/pxt-mid#v1", ["*", "github:someorg/pxt-ext#v2"]],
+                ["github:someorg/pxt-ext#v2", []],
+            );
+            chai.expect(simxDependsOn(project, REF, EXT)).equals(true);
+            chai.expect(simxDependsOn(project, MID, EXT)).equals(true);
+            chai.expect(simxDependsOn(project, EXT, MID)).equals(false);
+        });
+
+        it("finds none when no path leads from the one extension to the other", () => {
+            const project = packages(
+                ["file:.", ["github:reforg/pxt-ref#v1", "github:someorg/pxt-ext#v2"]],
+                ["github:reforg/pxt-ref#v1", ["*", undefined]],
+                ["github:someorg/pxt-ext#v2", ["*"]],
+            );
+            chai.expect(simxDependsOn(project, REF, EXT)).equals(false);
+        });
+
+        it("matches keys and version specs ignoring case", () => {
+            const project = packages(
+                ["github:RefOrg/PXT-Ref#v1", ["github:SOMEORG/pxt-ext#v2"]],
+                ["github:SOMEORG/pxt-ext#v2", []],
+            );
+            chai.expect(simxDependsOn(project, "reforg/pxt-ref", "SomeOrg/PXT-Ext")).equals(true);
+        });
+
+        it("finds nothing for a key no package of the graph is, or one naming no repository", () => {
+            const project = packages(
+                ["github:reforg/pxt-ref#v1", ["github:someorg/pxt-ext#v2"]],
+                ["github:someorg/pxt-ext#v2", []],
+            );
+            chai.expect(simxDependsOn(project, "nobody/pxt-none", EXT)).equals(false);
+            chai.expect(simxDependsOn(project, REF, "nobody/pxt-none")).equals(false);
+            chai.expect(simxDependsOn(project, "owner", EXT)).equals(false);
+            chai.expect(simxDependsOn([], REF, EXT)).equals(false);
+        });
+
+        it("terminates on a cycle in the graph, finding what the cycle reaches", () => {
+            const cycle = packages(
+                ["github:reforg/pxt-ref#v1", ["github:midorg/pxt-mid#v1"]],
+                ["github:midorg/pxt-mid#v1", ["github:reforg/pxt-ref#v1"]],
+            );
+            chai.expect(simxDependsOn(cycle, REF, EXT)).equals(false);
+            const reaching = cycle.concat(packages(["github:midorg/pxt-mid#v1", ["github:someorg/pxt-ext#v2"]]));
+            chai.expect(simxDependsOn(reaching, REF, EXT)).equals(true);
+        });
+    });
+
+    describe("the tabs a project is offered", () => {
+        const both = ["github:someorg/pxt-ext#v2", "github:reforg/pxt-ref#v1"];
+        const depending = packages(["github:reforg/pxt-ref#v1", ["github:someorg/pxt-ext#v2"]], ["github:someorg/pxt-ext#v2", []]);
+        const independent = packages(["github:reforg/pxt-ref#v1", []], ["github:someorg/pxt-ext#v2", []]);
+
+        it("offers a tab talking to another registration's simulator frame only when the project includes its extension and that extension depends on the other's", () => {
+            const registrations = [tab(EXT), tab(REF, EXT)];
+            const keys = (deps: string[], project: SimxProjectPackage[]) => getProjectSimxEditors(registrations, deps, () => project).map(r => r.key);
+            chai.expect(keys(both, depending)).deep.equals([EXT, REF]);
+            chai.expect(keys(both, independent)).deep.equals([EXT]);
+            chai.expect(keys(["github:someorg/pxt-ext#v2"], depending)).deep.equals([EXT]);
+        });
+
+        it("reports each tab whose extension the project includes but which does not depend on the other's", () => {
+            const reported: [string, string][] = [];
+            const offered = (deps: string[], project: SimxProjectPackage[]) =>
+                getProjectSimxEditors([tab(EXT), tab(REF, EXT)], deps, () => project, (key, simulatorKey) => reported.push([key, simulatorKey])).map(r => r.key);
+            offered(both, independent);
+            offered(["github:someorg/pxt-ext#v2"], independent);
+            offered(both, depending);
+            chai.expect(reported).deep.equals([[REF, EXT]]);
+        });
+
+        it("reads the packages only to decide a dependency", () => {
+            let reads = 0;
+            const read = () => {
+                reads++;
+                return depending;
+            };
+            getProjectSimxEditors([tab(EXT), tab(REF, EXT)], ["github:someorg/pxt-ext#v2"], read);
+            chai.expect(reads).equals(0);
+            getProjectSimxEditors([tab(EXT), tab(REF, EXT), tab(MID, EXT)], [...both, "github:midorg/pxt-mid#v1"], read);
+            chai.expect(reads).equals(1);
+            reads = 0;
+            chai.expect(projectIncludesSimx(EXT, EXT, both, read)).equals(true);
+            chai.expect(projectIncludesSimx(EXT, undefined, both, read)).equals(true);
+            chai.expect(reads).equals(0);
+            chai.expect(projectIncludesSimx(REF, EXT, both, read)).equals(true);
+            chai.expect(reads).equals(1);
+        });
+    });
+
+    describe("the tabs a simulator frame talks to", () => {
+        const keys = (registrations: SimxEditorRegistration[], key: string) => getSimxFrameTabs(registrations, key).map(t => t.key);
+
+        it("lists the frame's own tab first, then the tabs of the registrations naming it, in registration order", () => {
+            const registrations = [tab(REF, EXT), tab("otherorg/pxt-other"), tab(EXT), tab(MID, EXT)];
+            chai.expect(keys(registrations, EXT)).deep.equals([EXT, REF, MID]);
+            chai.expect(keys(registrations, "otherorg/pxt-other")).deep.equals(["otherorg/pxt-other"]);
+        });
+
+        it("lists only the tabs naming a frame whose registration has no tab of its own, and none for a frame no tab talks to", () => {
+            const registrations = [tab(REF, EXT), tab(MID, EXT)];
+            chai.expect(keys(registrations, EXT)).deep.equals([REF, MID]);
+            chai.expect(keys(registrations, REF)).deep.equals([]);
+            chai.expect(keys([], EXT)).deep.equals([]);
+        });
+
+        it("carries each tab's label, and its icon's URL only for an SVG icon", () => {
+            const iconUrl = `https://sim.example/simx/${REF}/-/icon.svg`;
+            const registrations = [
+                tab(EXT, EXT, { label: "Ext" }),
+                tab(REF, EXT, { label: "Ref", iconUrl }),
+                tab(MID, EXT, { label: "Mid", icon: "xicon js" }),
+            ];
+            chai.expect(getSimxFrameTabs(registrations, EXT)).deep.equals([
+                { key: EXT, label: "Ext" },
+                { key: REF, label: "Ref", iconUrl },
+                { key: MID, label: "Mid" },
+            ]);
+        });
     });
 });
 
@@ -6750,7 +7231,7 @@ describe("simulator extension editor tab host", () => {
     let host: SimxEditorHost;
 
     function registration(key: string, extra: Partial<SimxEditorRegistration> = {}): SimxEditorRegistration {
-        return { key, label: key + " label", url: `${ORIGIN}/simx/${key}/-/index.html`, ...extra };
+        return { key, label: key + " label", url: `${ORIGIN}/simx/${key}/-/index.html`, simulatorKey: key, ...extra };
     }
 
     const params = { parentOrigin: "https://editor.example", target: "arcade", project: "p1", language: "en" };
@@ -6843,7 +7324,7 @@ describe("simulator extension editor tab host", () => {
 
         it("delegates the camera to the tab frame of a registration resolved with allowCamera", () => {
             const [resolved] = getSimxEditorRegistrations({
-                [EXT]: { editor: { label: "Ext" }, editorUrl: `${ORIGIN}/simx/${EXT}/-/index.html`, allowCamera: true },
+                [EXT]: { editor: { label: "Ext" }, editorUrl: `${ORIGIN}/simx/${EXT}/-/index.html`, simulatorKey: EXT, allowCamera: true },
             });
             host.show(resolved, container as unknown as HTMLElement, params);
             chai.expect(tab(EXT).attributes).deep.equals({
@@ -6855,7 +7336,7 @@ describe("simulator extension editor tab host", () => {
         it("applies every grant to the tab frame of a registration resolved with all of them", () => {
             const [resolved] = getSimxEditorRegistrations({
                 [EXT]: {
-                    editor: { label: "Ext" }, editorUrl: `${ORIGIN}/simx/${EXT}/-/index.html`,
+                    editor: { label: "Ext" }, editorUrl: `${ORIGIN}/simx/${EXT}/-/index.html`, simulatorKey: EXT,
                     allowPopups: true, allowClipboard: true, allowCamera: true, allowMidi: true, allowUsb: true,
                     allowSerial: true, allowBluetooth: true, allowHid: true, allowMotionSensors: true, allowDisplayCapture: true, allowGamepad: true,
                     allowDownloads: true, allowPointerLock: true,
@@ -7179,8 +7660,8 @@ describe("simulator extension editor tab host", () => {
             ready(EXT);
             const { tab: tabPorts, simulator } = brokered(EXT, simulatorFrame);
             chai.expect(channels.length).equals(1);
-            chai.expect(simulator).deep.equals([{ msg: { type: "simxeditorport", key: EXT }, origin: ORIGIN, transfer: [channels[0].port1] }]);
-            chai.expect(tabPorts).deep.equals([{ msg: { type: "simxeditorport", key: EXT }, origin: ORIGIN, transfer: [channels[0].port2] }]);
+            chai.expect(simulator).deep.equals([{ msg: { type: "simxeditorport", key: EXT, peer: EXT }, origin: ORIGIN, transfer: [channels[0].port1] }]);
+            chai.expect(tabPorts).deep.equals([{ msg: { type: "simxeditorport", key: EXT, peer: EXT }, origin: ORIGIN, transfer: [channels[0].port2] }]);
         });
 
         it("brokers a port pair when the simulator frame loads after the tab became ready", () => {
@@ -7251,6 +7732,83 @@ describe("simulator extension editor tab host", () => {
             chai.expect(ports(extFrame).map(p => p.msg.key)).deep.equals([EXT]);
             chai.expect(ports(tab(OTHER))[0].transfer).deep.equals([channels[0].port2]);
             chai.expect(ports(extFrame)[0].transfer).deep.equals([channels[1].port1]);
+        });
+    });
+
+    describe("tabs talking to another registration's simulator frame", () => {
+        const REF = "reforg/pxt-ref";
+        const MID = "midorg/pxt-mid";
+
+        it("starts the simulator frame the tab talks to each time it is shown, never one of the tab's own key", () => {
+            show(REF, { simulatorKey: EXT });
+            host.hide();
+            show(REF, { simulatorKey: EXT });
+            chai.expect(started).deep.equals([EXT, EXT]);
+        });
+
+        it("posts each end of a pair with the receiving side's own key and the other side's", () => {
+            const extFrame = loadSimulatorFrame(EXT);
+            show(REF, { simulatorKey: EXT });
+            ready(REF);
+            chai.expect(channels.length).equals(1);
+            chai.expect(ports(extFrame)).deep.equals([{ msg: { type: "simxeditorport", key: EXT, peer: REF }, origin: ORIGIN, transfer: [channels[0].port1] }]);
+            chai.expect(ports(tab(REF))).deep.equals([{ msg: { type: "simxeditorport", key: REF, peer: EXT }, origin: ORIGIN, transfer: [channels[0].port2] }]);
+        });
+
+        it("brokers, when the simulator frame loads, one pair to its own ready tab and one to every ready tab talking to it", () => {
+            show(EXT);
+            show(REF, { simulatorKey: EXT });
+            show(OTHER);
+            show(MID, { simulatorKey: EXT });
+            [EXT, REF, OTHER, MID].forEach(key => ready(key));
+            chai.expect(channels.length).equals(0);
+            const extFrame = loadSimulatorFrame(EXT);
+            chai.expect(channels.length).equals(3);
+            chai.expect(ports(extFrame).map(p => [p.msg.peer, p.transfer])).deep.equals([
+                [EXT, [channels[0].port1]],
+                [REF, [channels[1].port1]],
+                [MID, [channels[2].port1]],
+            ]);
+            chai.expect([EXT, REF, MID].map(key => ports(tab(key)).map(p => p.transfer))).deep.equals([
+                [[channels[0].port2]],
+                [[channels[1].port2]],
+                [[channels[2].port2]],
+            ]);
+            chai.expect(ports(tab(OTHER))).deep.equals([]);
+        });
+
+        it("starts each simulator frame the tabs talk to once after the simulator unloads", () => {
+            show(EXT);
+            show(REF, { simulatorKey: EXT });
+            show(MID, { simulatorKey: OTHER });
+            started = [];
+            host.ensureSimulatorFrames();
+            chai.expect(started).deep.equals([EXT, OTHER]);
+        });
+
+        it("brokers one new pair per ready tab each time the simulator frame they talk to loads", () => {
+            show(EXT);
+            show(REF, { simulatorKey: EXT });
+            ready(EXT);
+            ready(REF);
+            const first = loadSimulatorFrame(EXT);
+            simulatorColumn.removeChild(first);
+            const second = loadSimulatorFrame(EXT);
+            host.simulatorFrameLoaded(EXT, second as unknown as HTMLIFrameElement);
+            chai.expect(channels.length).equals(6);
+            chai.expect([first, second].map(frame => ports(frame).map(p => p.msg.peer))).deep.equals([[EXT, REF], [EXT, REF, EXT, REF]]);
+            chai.expect([EXT, REF].map(key => ports(tab(key)).length)).deep.equals([3, 3]);
+        });
+
+        it("brokers nothing to a tab once the tab frames are removed", () => {
+            show(REF, { simulatorKey: EXT });
+            ready(REF);
+            host.close();
+            loadSimulatorFrame(EXT);
+            started = [];
+            host.ensureSimulatorFrames();
+            chai.expect(channels.length).equals(0);
+            chai.expect(started).deep.equals([]);
         });
     });
 });

@@ -19,8 +19,8 @@ const WEB_PREFIX = "http://localhost:9876";
 // Blockly crashes if this isn't defined
 (Blockly as any).Msg.DELETE_VARIABLE = "Delete the '%1' variable";
 
-// The editor can create instances of things.Thing, so parameters of that type get the instance dropdown
-pxt.react.canCreateInstance = typeQName => typeQName === "things.Thing";
+// One creator can create instances of things.Thing, so parameters of that type get the instance dropdown
+pxt.react.getInstanceCreators = typeQName => typeQName === "things.Thing" ? [{ id: "someorg/pxt-ext", label: "Ext" }] : [];
 
 // Just needs to exist
 pxt.setAppTarget({

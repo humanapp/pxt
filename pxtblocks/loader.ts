@@ -505,7 +505,7 @@ function initBlock(block: Blockly.Block, info: pxtc.BlocksInfo, fn: pxtc.SymbolI
                     let isConstantShim = !!fn.attributes.constantShim;
                     let isCombined = pr.type == "@combined@"
                     let customField = pr.fieldEditor;
-                    if (isFixed && !customField && pxt.react.canCreateInstance?.(typeInfo.qName))
+                    if (isFixed && !customField && pxt.react.getInstanceCreators?.(typeInfo.qName)?.length)
                         customField = INSTANCE_DROPDOWN_FIELD;
                     let fieldLabel = defName.charAt(0).toUpperCase() + defName.slice(1);
                     let fieldType = pr.type;

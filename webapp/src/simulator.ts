@@ -16,13 +16,17 @@ import { createProjassetsConfig, ProjassetsConfig, ProjassetsHost } from "./proj
 import { ProjprogramCompileOutcome, ProjprogramHost } from "./projprogramHost";
 import {
     answerSimxEditorRequest,
-    findSimxInstanceCreator,
-    getDependencyRepository,
+    findSimxInstanceCreators,
+    findSimxInstanceOpener,
+    getDependencyExtension,
     getProjectSimxEditors,
     getSimxEditorRegistrations,
-    isSimxInProject,
+    getSimxFrameTabs,
+    opensSimxInstance,
+    projectIncludesSimx,
     SimxEditorHost,
     SimxEditorRegistration,
+    SimxProjectPackage,
 } from "./simxEditorHost";
 import { OpenProjectTracker } from "./simxRequests";
 import { SimxEditorSimulatorCommand, SimxEditorSimulatorState } from "../../pxtservices/simxeditor";
@@ -340,12 +344,13 @@ export async function initAsync(cfg: SimulatorConfig) {
             projprogramHost.handleMessageAsync(key, msg, reply);
         },
         onSimxEditorMessage: (key, msg, reply) => {
-            reply(answerSimxEditorRequest(key, msg, k => cfg.openSimxEditor(k)) as pxsim.SimulatorMessage);
+            const tabs = getSimxFrameTabs(getProjectSimxEditorRegistrations(), key);
+            reply(answerSimxEditorRequest(key, msg, tabs, k => cfg.openSimxEditor(k)) as pxsim.SimulatorMessage);
         },
         onSimxFrameLoad: (key, frame) => {
             simxEditorHost?.simulatorFrameLoaded(key, frame);
         },
-        isSimxInProject: key => isSimxInProject(key, getProjectDependencies()),
+        isSimxInProject: key => projectIncludesSimx(key, driver.options.simulatorExtensions?.[key]?.simulatorKey, getProjectDependencies(), getProjectPackages, logIndependentSimx),
         onFramesUnloaded: () => {
             simxEditorHost?.ensureSimulatorFrames();
         },
@@ -383,13 +388,14 @@ export async function initAsync(cfg: SimulatorConfig) {
 /**
  * Returns the editor tabs of simulator extensions the editor offers for the open
  * project, in registration order: those of registrations that declare and enable
- * a tab, whose extension the project includes.
+ * a tab, whose extension the project includes, and which, when the tab talks to
+ * another registration's simulator frame, depend on that registration's extension.
  */
 export function getProjectSimxEditorRegistrations(): SimxEditorRegistration[] {
     if (!driver || !pkg.mainPkg) return [];
     const registrations = getSimxEditorRegistrations(driver.options.simulatorExtensions);
     if (!registrations.length) return [];
-    return getProjectSimxEditors(registrations, getProjectDependencies());
+    return getProjectSimxEditors(registrations, getProjectDependencies(), getProjectPackages, logIndependentSimx);
 }
 
 /** Returns the version specs of every package the open project has loaded, without resolving any package. */
@@ -398,31 +404,98 @@ function getProjectDependencies(): string[] {
     return Object.keys(deps).map(id => deps[id]?._verspec);
 }
 
+// the main package getProjectPackages last read, with its packages once its load completed
+let projectPackages: { main: pxt.MainPackage, packages?: SimxProjectPackage[] } | undefined;
+
+/**
+ * Returns the packages the open project has loaded, from the project down its
+ * dependencies, each with the version specs of the packages it depends on,
+ * without resolving any package. Cached per main package once its load has
+ * completed; read afresh until then.
+ */
+function getProjectPackages(): SimxProjectPackage[] {
+    const main = pkg.mainPkg;
+    const read = () => (main?.sortedDeps() || []).map(p => ({
+        spec: p._verspec,
+        dependencies: p.resolvedDependencies().map(d => d?._verspec),
+    }));
+    if (!main) return [];
+    if (projectPackages?.main !== main) {
+        const record: typeof projectPackages = { main };
+        projectPackages = record;
+        pkg.mainEditorPkg().loadedAsync().then(() => {
+            if (projectPackages === record && pkg.mainPkg === main) record.packages = read();
+        }, () => { });
+    }
+    return projectPackages.packages || read();
+}
+
+// the keys of the registrations naming a simulator frame their extension does not depend on, logged since the open project loaded
+const loggedSimxReferences = new Set<string>();
+
+// logs, once per project load, that the extension registered under `key` does not depend on that of `simulatorKey`, whose simulator frame its registration names
+function logIndependentSimx(key: string, simulatorKey: string) {
+    if (loggedSimxReferences.has(key)) return;
+    loggedSimxReferences.add(key);
+    pxt.warn(`simulator extension ${key}: its registration names ${simulatorKey}'s simulator frame, but the extension does not depend on it; offering no tab`);
+}
+
 // the ignored claims on types, by registration key and type, logged since the open project loaded
 const loggedSimxClaims = new Set<string>();
 
 /**
- * Returns the key of the simulator extension whose editor tab creates the
- * instances of the fixed-instance type `typeQName`, among those whose tabs the
- * editor offers the open project, or undefined if none does. Only a
- * registration of the GitHub repository of the type's declaring package may
- * create them, and the first such in registration order does; every other
- * registration naming the type in its `creates` is logged once per project load.
+ * Returns the keys of the simulator extensions whose editor tabs create the
+ * instances of the fixed-instance type `typeQName`, among those the open
+ * project includes, in registration order. Only a registration of the GitHub
+ * repository of the type's declaring package, or one whose extension depends
+ * on that package's extension, may create them. Every other registration
+ * naming the type in its `creates` is logged once per project load.
  * @param declaringPackage the id of the package that declares the type, as the type's `pkg` gives it; undefined for the project's own code
  */
-export function getProjectSimxInstanceCreator(typeQName: string, declaringPackage: string | undefined): string | undefined {
+export function getProjectSimxInstanceCreators(typeQName: string, declaringPackage: string | undefined): string[] {
     const registrations = getProjectSimxEditorRegistrations();
-    const spec = declaringPackage ? pkg.mainPkg?.deps[declaringPackage]?._verspec : undefined;
-    const { creator, ignored } = findSimxInstanceCreator(registrations, typeQName, getDependencyRepository(spec));
-    for (const { key, reason } of ignored) {
+    const { creators, ignored } = findSimxInstanceCreators(registrations, typeQName, getPackageExtension(declaringPackage), getProjectPackages);
+    for (const { key } of ignored) {
         const claim = `${key} ${typeQName}`;
         if (loggedSimxClaims.has(claim)) continue;
         loggedSimxClaims.add(claim);
-        pxt.warn(reason === "OTHER_REPOSITORY"
-            ? `simulator extension ${key}: ignoring its claim to create ${typeQName}, which no package of its repository declares`
-            : `simulator extension ${key}: ignoring its claim to create ${typeQName}, which an earlier registration creates`);
+        pxt.warn(`simulator extension ${key}: ignoring its claim to create ${typeQName}, which no package of its repository declares and whose declaring extension it does not depend on`);
     }
-    return creator?.key;
+    return creators.map(r => r.key);
+}
+
+/**
+ * Returns true if the editor tab of the simulator extension registered under
+ * `key` opens the fixed instance `instance` of the open project, as
+ * {@link opensSimxInstance} decides it.
+ * @param instance the instance, as the API info gives it
+ * @param typeDeclaringPackage the id of the package that declares the instance's type, as the type's `pkg` gives it; undefined for the project's own code
+ */
+export function projectSimxEditorOpensInstance(key: string, instance: Pick<pxtc.SymbolInfo, "pkg" | "fileName">, typeDeclaringPackage: string | undefined): boolean {
+    return opensSimxInstance(key, instance, getPackageExtension(typeDeclaringPackage), getProjectPackages);
+}
+
+// the qualified names of the fixed instances whose ignored `editor` attribute was logged since the open project loaded
+const loggedSimxInstanceEditors = new Set<string>();
+
+/**
+ * Returns the key of the tab among `offered` that opens the fixed instance
+ * `instance` of the open project: the offered tab its `editor` attribute
+ * names, else, without the attribute, the one `getCreatorOpener` returns, as
+ * {@link findSimxInstanceOpener} decides it. An `editor` attribute it ignores
+ * is logged once per instance per project load.
+ * @param instance the instance, as the API info gives it
+ * @param offered the keys of the tabs the editor offers the open project
+ * @param getCreatorOpener returns the key of a tab that creates the instances of the instance's type and opens the instance; called only for an instance without the attribute
+ * @param creatable whether an offered tab creates the instance's type
+ */
+export function getProjectSimxInstanceOpener(instance: Pick<pxtc.SymbolInfo, "qName" | "attributes" | "pkg">, offered: string[], getCreatorOpener: () => string | undefined, creatable: boolean): string | undefined {
+    return findSimxInstanceOpener(instance, offered, getCreatorOpener, loggedSimxInstanceEditors, creatable);
+}
+
+// the GitHub extension, `owner/repo[/path]`, of the open project's package `id`, from its version spec; undefined for no id, or a package not from GitHub
+function getPackageExtension(id: string | undefined): string | undefined {
+    return id ? getDependencyExtension(pkg.mainPkg?.deps[id]?._verspec) : undefined;
 }
 
 /** Tells every ready simulator extension editor tab that the editor is giving the simulator `command`. */
@@ -442,16 +515,21 @@ export function setFullscreen(enabled: boolean) {
 
 /**
  * Closes the open project to simulator extensions: removes every editor tab
- * frame, with the actions held for the tabs, forgets the ignored `creates`
- * claims logged for the project, refuses the project-file, project-asset and
- * compiled-program requests still waiting for the project, compiled-program
- * requests whose compile is running included, with `PROJECT_CLOSED`, and ends
- * every project-file and project-asset subscription. Call before the simulator
- * unloads, as the project closes or another load begins.
+ * frame, with the actions held for the tabs, forgets the project's packages
+ * and the ignored `creates` claims, the ignored fixed-instance `editor`
+ * attributes and the unmet `simulator` dependencies logged for the project,
+ * refuses the project-file, project-asset and compiled-program requests still
+ * waiting for the project, compiled-program requests whose compile is running
+ * included, with `PROJECT_CLOSED`, and ends every project-file and
+ * project-asset subscription. Call before the simulator unloads, as the
+ * project closes or another load begins.
  */
 export function closeSimxProject() {
     simxEditorHost?.close();
     loggedSimxClaims.clear();
+    loggedSimxInstanceEditors.clear();
+    loggedSimxReferences.clear();
+    projectPackages = undefined;
     openProject.close();
     projfsHost.close();
     projassetsHost.close();

@@ -658,6 +658,15 @@ have side effects. This happens automatically when there is no initializer,
 or the initializer is a simple constant, but for function calls and constructors
 you have to include `whenUsed`.
 
+A fixed instance can also carry `editor="<kind>:<id>"`, naming the editor that edits it.
+The only kind is `simx`, so `editor="simx:owner/repo"` names a
+[simulator extension](/extensions/simulator-extensions) by its registration key.
+When the project includes that extension, the "Edit ..." entry in the instance's dropdown
+opens the instance in that extension's editor tab.
+The entry is offered only for an instance declared in the project's own code.
+A dropdown has an "Edit ..." entry only for a type that some simulator extension's
+editor tab creates (see `editor.creates`).
+
 **Playground example**: [Fixed instances](https://makecode.com/playground#language-fixed-instances)
 
 ### Properties

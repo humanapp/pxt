@@ -85,9 +85,10 @@ declare namespace pxt {
         allowFileWrite?: boolean; // If true, the frame may list, read, write and delete files in its own folder of the project ("projfs" messages). Default: false.
         allowAssetRead?: boolean; // If true, the frame may list the open project's assets and visual configuration (palette, simulator theme) and subscribe to their changes ("projassets" messages). Default: false.
         allowProgramRead?: boolean; // If true, the frame may compile the open project and receive the program the simulator runs ("projprogram" messages). Default: false.
-        editor?: SimxEditorConfig; // The extension's editor tab. Ignored unless allowEditorTab is set; refused on a registration with permanent set to false. Default: undefined.
-        allowEditorTab?: boolean; // If true, the editor offers the tab `editor` describes, brokers a port between it and the simulator frame, and serves the simulator frame's request to open it ("simxeditor" messages); the registration's grants above apply to the tab frame as well as the simulator frame. Default: false.
+        editor?: SimxEditorConfig; // The extension's editor tab. Ignored unless allowEditorTab is set; refused when the simulator frame it talks to (this registration's, or the one `simulator` names) is registered with permanent set to false. Default: undefined.
+        allowEditorTab?: boolean; // If true, the editor offers the tab `editor` describes, brokers a port between it and the simulator frame it talks to, and serves that frame's requests to list the tabs and open this one ("simxeditor" messages); the registration's grants above apply to the tab frame as well as the simulator frame. Default: false.
         hideInFullscreen?: boolean; // If true, hide the iframe in fullscreen-simulator mode; it stays loaded and keeps messaging. Default: false.
+        simulator?: string; // The key, in `approvedRepoLib`, of another registration whose simulator frame this extension's editor tab talks to, in place of a frame of its own. The registration must declare `editor` and set `allowEditorTab`; the other registration must have a permanent simulator frame that reads `peer` on the port message, and set no `simulator` itself. Honored only while the extension depends, directly or not, on the other registration's extension in the open project. Default: undefined.
         // backend-only options
         sha?: string; // The commit to checkout (must exist in the branch/ref). Required.
         repo?: string; // Actual repo to load simulator extension from. Defaults to key of parent in `approvedRepoLib` map.
@@ -103,7 +104,7 @@ declare namespace pxt {
         index: string; // The path to the tab's page within the artifact, resolved as the simulator extension's `index` is. Required.
         label?: string | pxt.Map<string>; // The tab's name in the editor toggle, and its accessible name: the name, or a map from language code (e.g. "en", "pt-BR") to the name in that language, from which the editor picks the user's language, its base language, or its lower-case code (e.g. "pt-br"), then "en", then the first entry with text. When none resolves, or no label is given, the registration's key names the tab.
         icon?: string; // The icon shown before the label in the editor toggle: a font icon's class names (e.g. "xicon js"), or, if it contains a "/" or ends in ".svg", the path to an SVG within the artifact, resolved as `index` is and drawn in the toggle's text color. Default: none.
-        creates?: string[]; // The fully qualified names of fixed-instance types whose instances the tab creates (e.g. "myext.Widget"); a block dropdown listing a type's instances ends in an entry asking the tab to create one. Honoured only for a type declared by a package of the extension's own repository; for a type two registrations claim, the first in registration order. Default: none.
+        creates?: string[]; // The fully qualified names of fixed-instance types whose instances the tab creates (e.g. "myext.Widget"). A claim is honored for a type declared by the extension's own repository or by an extension it depends on in the open project. While the editor offers the tab, each honored claim adds an entry asking the tab for a new instance to the block dropdowns listing the type's instances, naming the tab by its label when several tabs claim the type. The dropdown's "Edit ..." entry follows the instance's `editor` attribute when it has one, and otherwise is offered for an instance the project's own code declares in a claimant's folder or in its declaring extension's folder, going to the first such claimant in registration order. Default: none.
     }
 
     interface ShareConfig {
@@ -952,6 +953,7 @@ declare namespace ts.pxtc {
         blockSetVariable?: string; // show block with variable assigment in toolbox. Set equal to a name to control the var name
         fixedInstances?: boolean;
         fixedInstance?: boolean;
+        editor?: string; // on a fixed instance, `simx:<registration key>`: the simulator extension whose editor tab edits the instance. The "Edit ..." entry exists only in a dropdown whose type an editor tab creates.
         expose?: boolean; // expose to VM despite being in pxt:: namespace
         decompileIndirectFixedInstances?: boolean; // Attribute on TYPEs with fixedInstances set to indicate that expressions with that type may be decompiled even if not a fixed instance
         decompilerShadowAlias?: string; // hints to the decompiler that this block can be replaced with the block with this id if doing so would create a shadow block

@@ -124,9 +124,9 @@ const loggedSimxLabels = new Set<string>();
  * registration that declares an `editor` and sets `allowEditorTab` and whose tab
  * talks to a permanent simulator frame, each named in the user's language and
  * talking to the simulator frame of its resolved `simulatorKey`, else to that of
- * its own key. The tab of a registration whose label holds
- * no non-empty name (no label, an empty text, or a map whose values are all empty)
- * is named by the registration's key, and the registration is logged once per key.
+ * its own key. The tab of a registration whose label holds no non-empty name (no
+ * label, an empty text, or a map whose values are all empty) is named by the
+ * registration's key, and the registration is logged once per key.
  */
 export function getSimxEditorRegistrations(simulatorExtensions: pxt.Map<SimxEditorRegistrationConfig> | undefined): SimxEditorRegistration[] {
     const userLanguage = pxt.Util.userLanguage();
@@ -248,10 +248,12 @@ export function opensSimxInstance(
 
 /** Why the editor ignores a fixed instance's `editor` attribute. */
 export type SimxInstanceEditorIgnoredReason =
-    /** The value is not a kind, a colon and an identifier, or its `simx` identifier names no repository. */
+    /** The value is not a kind, a colon and an identifier, or its `simx` identifier is not shaped as a registration key, `owner/repo` or `owner/repo/path`. */
     "MALFORMED"
     /** The value's kind is not one the editor knows. */
-    | "UNKNOWN_KIND";
+    | "UNKNOWN_KIND"
+    /** The value names an offered tab, but no offered tab creates the instances of the type whose dropdown lists the instance. */
+    | "NO_CREATOR";
 
 /** What a fixed instance's `editor` attribute names, or why the editor ignores it. */
 export type SimxInstanceEditor =
@@ -261,53 +263,62 @@ export type SimxInstanceEditor =
 /**
  * Reads `value`, the `editor` attribute of a fixed instance, `<kind>:<id>`,
  * split at its first colon: returns the kind and the identifier the kind
- * interprets, or why the editor ignores the value. The one kind is `simx`,
+ * interprets, or why the editor ignores the value. The only kind is `simx`,
  * whose identifier is the registration key of the simulator extension whose
- * editor tab edits the instance, such as `owner/repo/path`.
+ * editor tab edits the instance, `owner/repo` or `owner/repo/path`.
  * @returns undefined for an instance without the attribute
  */
 export function parseSimxInstanceEditor(value: string | undefined): SimxInstanceEditor | undefined {
     if (value === undefined) return undefined;
     const colon = value.indexOf(":");
+    if (colon <= 0) return { reason: "MALFORMED" };
     const kind = value.slice(0, colon);
     const id = value.slice(colon + 1);
-    if (colon <= 0 || !id) return { reason: "MALFORMED" };
+    if (!id) return { reason: "MALFORMED" };
     if (kind !== "simx") return { reason: "UNKNOWN_KIND" };
-    if (!getSimxExtension(id)) return { reason: "MALFORMED" };
+    if (!/^[^/#:\s]+\/[^/#:\s]+(\/[^#:\s]+)?$/.test(id) || !getSimxExtension(id)) return { reason: "MALFORMED" };
     return { kind, id };
 }
 
 /**
  * Returns the key of the tab among `offered` that opens the fixed instance
- * `instance`, or undefined if none does. An instance whose `editor` attribute
- * names a `simx` key, as {@link parseSimxInstanceEditor} reads it, opens in
- * the offered tab of that key, compared ignoring case, whatever creates the
- * instance's type; an attribute the editor ignores opens nothing and is
- * logged once per instance. An instance without the attribute opens in the
- * tab `getCreatorOpener` returns.
+ * `instance`, or undefined if none does: for an instance of the project's own
+ * code, the offered tab its `editor` attribute names, ignoring case; without
+ * the attribute, the tab `getCreatorOpener` returns. An ignored attribute is
+ * logged once per instance.
  * @param instance the instance, as the API info gives it
  * @param offered the keys of the tabs the editor offers the open project
- * @param getCreatorOpener returns the key of the tab that creates the instances of the instance's type, when that tab opens the instance; called only for an instance without the attribute
+ * @param getCreatorOpener returns the key of a tab that creates the instances of the instance's type and opens the instance; called only for an instance without the attribute
  * @param logged the qualified names of the instances whose ignored attribute was logged; updated
+ * @param creatable whether an offered tab creates the instance's type
  */
 export function findSimxInstanceOpener(
-    instance: Pick<pxtc.SymbolInfo, "qName" | "attributes">,
+    instance: Pick<pxtc.SymbolInfo, "qName" | "attributes" | "pkg">,
     offered: string[],
     getCreatorOpener: () => string | undefined,
-    logged: Set<string>
+    logged: Set<string>,
+    creatable: boolean
 ): string | undefined {
     const value = instance.attributes?.editor;
     const editor = parseSimxInstanceEditor(value);
     if (!editor) return getCreatorOpener();
+    let reason: SimxInstanceEditorIgnoredReason | undefined;
+    let key: string | undefined;
     if ("reason" in editor) {
+        reason = editor.reason;
+    } else if (!instance.pkg) {
+        const extension = getSimxExtension(editor.id);
+        key = offered.find(k => getSimxExtension(k) === extension);
+        if (key && !creatable) reason = "NO_CREATOR";
+    }
+    if (reason) {
         if (!logged.has(instance.qName)) {
             logged.add(instance.qName);
-            pxt.warn(`fixed instance ${instance.qName}: ignoring its editor attribute "${value}" (${editor.reason}); offering no Edit entry`);
+            pxt.warn(`fixed instance ${instance.qName}: ignoring its editor attribute "${value}" (${reason}); offering no Edit entry`);
         }
         return undefined;
     }
-    const extension = getSimxExtension(editor.id);
-    return offered.find(key => getSimxExtension(key) === extension);
+    return key;
 }
 
 /**
@@ -348,48 +359,44 @@ export function getDependencyExtension(dependency: string | undefined): string |
 /** Why the editor ignores a registration's claim, in its `creates`, on a type. */
 export type SimxCreatesIgnoredReason =
     /** No package of the registration's repository, nor of an extension its extension depends on, declares the type. */
-    "UNRELATED_EXTENSION"
-    /** A registration earlier in registration order already creates the type's instances. */
-    | "CLAIMED_EARLIER";
+    "UNRELATED_EXTENSION";
 
-/** The registration that creates a type's instances, and the claims on the type the editor ignores. */
-export interface SimxInstanceCreator {
-    /** The registration whose tab creates the type's instances; undefined if none does. */
-    creator: SimxEditorRegistration | undefined;
+/** The registrations that create a type's instances, and the claims on the type the editor ignores. */
+export interface SimxInstanceCreators {
+    /** The registrations whose tabs create the type's instances, in registration order. */
+    creators: SimxEditorRegistration[];
     /** The claims on the type the editor ignores, in registration order. */
     ignored: { key: string, reason: SimxCreatesIgnoredReason }[];
 }
 
 /**
- * Returns the registration among `registrations` whose tab creates the
- * instances of the type `typeQName`: the first, in registration order, whose
- * `creates` names the type and whose key names the repository of
- * `typeExtension`, in any case, or an extension that depends on
- * `typeExtension`, as {@link simxDependsOn} decides it. Every other
- * registration naming the type is returned among the ignored claims.
+ * Returns the registrations among `registrations` whose tabs create the
+ * instances of the type `typeQName`: those whose `creates` names the type and
+ * whose key names the repository of `typeExtension`, in any case, or an
+ * extension that depends on `typeExtension`, as {@link simxDependsOn} decides
+ * it. Every other registration naming the type is returned among the ignored
+ * claims.
  * @param registrations the registrations the project includes, in registration order
  * @param typeExtension the GitHub extension, `owner/repo[/path]`, of the package declaring the type; undefined if that package is not from GitHub, as for the project's own code
  * @param getPackages returns the packages the open project has loaded; called at most once, and only to decide a dependency
  */
-export function findSimxInstanceCreator(
+export function findSimxInstanceCreators(
     registrations: SimxEditorRegistration[],
     typeQName: string,
     typeExtension: string | undefined,
     getPackages: () => SimxProjectPackage[]
-): SimxInstanceCreator {
+): SimxInstanceCreators {
     const repository = typeExtension && getSimxRepository(typeExtension);
     // the packages, read at most once for the whole call
     let packages: SimxProjectPackage[] | undefined;
     const related = (key: string) => getSimxRepository(key) === repository || simxDependsOn(packages || (packages = getPackages()), key, typeExtension);
-    const result: SimxInstanceCreator = { creator: undefined, ignored: [] };
+    const result: SimxInstanceCreators = { creators: [], ignored: [] };
     for (const r of registrations) {
         if (!r.creates?.some(type => type === typeQName)) continue;
         if (!repository || !related(r.key))
             result.ignored.push({ key: r.key, reason: "UNRELATED_EXTENSION" });
-        else if (result.creator)
-            result.ignored.push({ key: r.key, reason: "CLAIMED_EARLIER" });
         else
-            result.creator = r;
+            result.creators.push(r);
     }
     return result;
 }
@@ -447,12 +454,11 @@ export function getSimxEditorKeyOfMarker(name: string, registrations: SimxEditor
 }
 
 /**
- * Returns the reply to a request the simulator frame of the extension
- * registered under `key` posted to the editor, once the simulator driver has
- * let it through. A tabs request is answered with `tabs`. An open request shows
- * the tab its `key` names, or the frame's own when it names none, and is
- * refused with `INVALID_REQUEST` when its `key` is present but not a string,
- * and with `PERMISSION_DENIED` when no tab of `tabs` has that key.
+ * Returns the reply to a request the simulator frame registered under `key`
+ * posted, once the driver has let it through: the tabs list, or an open of the
+ * tab its `key` names (matched ignoring case; the frame's own when absent).
+ * `INVALID_REQUEST` for a key that is not a string or matches several tabs
+ * (logged once per key); `PERMISSION_DENIED` when no tab has that key.
  * @param tabs the tabs that talk to the frame, as {@link getSimxFrameTabs} lists them
  * @param open shows the tab of the given key; returns false, showing nothing, if the editor offers no such tab here
  */
@@ -466,13 +472,26 @@ export function answerSimxEditorRequest(key: string, msg: unknown, tabs: SimxEdi
     const requested = (msg as { key?: unknown }).key;
     if (requested !== undefined && typeof requested !== "string")
         return errorReply(SIMXEDITOR_MESSAGE_TYPE, id, "INVALID_REQUEST", "The key must be a string.");
-    const tabKey = requested === undefined ? key : requested;
-    if (!tabs.some(t => t.key === tabKey))
+    const tabKey = (requested === undefined ? key : requested).toLowerCase();
+    const matches = tabs.filter(t => t.key.toLowerCase() === tabKey);
+    if (matches.length > 1) {
+        const message = `The key ${requested === undefined ? key : requested} matches the tabs ${matches.map(t => t.key).join(", ")}, differing only in case.`;
+        if (!loggedSimxAmbiguousKeys.has(tabKey)) {
+            loggedSimxAmbiguousKeys.add(tabKey);
+            pxt.warn(`simulator extension ${key}: refusing an open request: ${message}`);
+        }
+        return errorReply(SIMXEDITOR_MESSAGE_TYPE, id, "INVALID_REQUEST", message);
+    }
+    const tab = matches[0];
+    if (!tab)
         return errorReply(SIMXEDITOR_MESSAGE_TYPE, id, "PERMISSION_DENIED", "The simulator frame does not serve that tab.");
-    if (!open(tabKey))
-        return errorReply(SIMXEDITOR_MESSAGE_TYPE, id, "UNAVAILABLE", "The editor does not offer this extension's tab here.");
+    if (!open(tab.key))
+        return errorReply(SIMXEDITOR_MESSAGE_TYPE, id, "UNAVAILABLE", "The editor does not offer that tab here.");
     return { type: SIMXEDITOR_MESSAGE_TYPE, id, subtype: "ack" };
 }
+
+// open keys refused as ambiguous, each warned once
+const loggedSimxAmbiguousKeys = new Set<string>();
 
 /** The parameters the editor passes to a tab frame in its URL, beside `channel`, `role` and `apiLevel`. */
 export interface SimxEditorFrameParams {

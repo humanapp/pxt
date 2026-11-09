@@ -38,17 +38,12 @@ export function getParentOrigin(search?: string): string | undefined {
 }
 
 /**
- * Returns the level of the simulator-extension APIs the editor hosting this
- * frame serves, which the editor passes in the frame URL's `apiLevel`
- * parameter. Level 1 is the `projfs`, `projassets`, `projprogram` and
- * `simxeditor` messages and the registration fields; each later level adds to
- * or alters them. Level 2 adds the `simulator` registration field, `peer` on
- * the `simxeditorport` message, `key` on the `simxeditor` open request, and
- * the `simxeditor` tabs request. Read it at startup to learn whether the
- * editor answers a request before sending it.
+ * Returns the simulator-extension API level the hosting editor serves, from
+ * the frame URL's `apiLevel` parameter. The API level table in
+ * pxtservices/simulator-extensions.md says what each level covers; read it at
+ * startup before sending a request a later level added.
  * @param search the frame URL's query string; defaults to `window.location.search`
- * @returns the level; 0, the level of an editor older than level 1, if the URL
- * provides none or one that is not a non-negative integer
+ * @returns the level, or 0 when the URL carries none or an invalid one
  */
 export function getSimxApiLevel(search?: string): number {
     const query = search !== undefined ? search : window.location.search;

@@ -3,7 +3,7 @@
     <block type="pxt-on-start" id="onStartBlock" x="20" y="20">
       <statement name="HANDLER">
         <block type="things_use" id="useThingBlock">
-          <field name="thing">@createinstance@</field>
+          <field name="thing">@createinstance@someorg/pxt-ext</field>
         </block>
       </statement>
     </block>

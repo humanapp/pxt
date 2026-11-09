@@ -13,17 +13,18 @@ namespace pxt.react {
     export let getFieldEditorView: <U>(fieldEditorId: string, value: U, options: any, container?: HTMLDivElement, keyboardTriggered?: boolean) => FieldEditorView<U>;
     export let getTilemapProject: () => TilemapProject;
     /**
-     * Returns true if the editor can create an instance of the fixed-instance
-     * type `typeQName`, a fully qualified name, here: a block dropdown of the
-     * type's instances then ends in an entry asking for a new one.
+     * Returns the creators of instances of the fixed-instance type `typeQName`,
+     * a fully qualified name, here, empty when nothing can create one, in the
+     * order a block dropdown lists them: each with the id `createInstance`
+     * takes and the label the dropdown names it by.
      */
-    export let canCreateInstance: (typeQName: string) => boolean;
+    export let getInstanceCreators: (typeQName: string) => { id: string, label: string }[];
     /**
-     * Opens whatever creates instances of the fixed-instance type `typeQName`
-     * and asks it to create one; does nothing if `canCreateInstance` returns
-     * false for the type.
+     * Opens the creator `creatorId` of instances of the fixed-instance type
+     * `typeQName`, one `getInstanceCreators` lists, and asks it to create one;
+     * does nothing for any other id.
      */
-    export let createInstance: (typeQName: string) => void;
+    export let createInstance: (typeQName: string, creatorId: string) => void;
     /**
      * Returns true if the editor can open the fixed instance `instanceQName`, a
      * fully qualified name, here: a block dropdown holding the instance then

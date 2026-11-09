@@ -895,25 +895,31 @@ export class ProjectView
     }
 
     /**
-     * Returns the key of the simulator extension whose editor tab creates the
-     * instances of the fixed-instance type `typeQName` and is offered here, or
-     * undefined if there is none. The type's declaring package is read from the
-     * API info the blocks were built from.
+     * Returns the offered editor tabs that create the instances of the
+     * fixed-instance type `typeQName`, in registration order. When there are
+     * none, logs each instance of the type whose `editor` attribute names an
+     * offered tab. The type and its instances are read from the API info the
+     * blocks were built from.
      */
-    getSimxInstanceCreator(typeQName: string): string | undefined {
-        const declaringPackage = pxtblockly.cachedBlockInfo?.apis.byQName[typeQName]?.pkg;
-        const key = simulator.getProjectSimxInstanceCreator(typeQName, declaringPackage);
-        return key && this.getSimxEditors().some(r => r.key === key) ? key : undefined;
+    getSimxInstanceCreators(typeQName: string): pxt.editor.SimxEditorInfo[] {
+        const apis = pxtblockly.cachedBlockInfo?.apis;
+        const keys = simulator.getProjectSimxInstanceCreators(typeQName, apis?.byQName[typeQName]?.pkg);
+        const offered = this.getSimxEditors();
+        const creators = offered.filter(r => keys.indexOf(r.key) >= 0);
+        if (!creators.length && apis && offered.length) {
+            for (const instance of pxtblockly.getFixedInstanceDropdownValues(apis, typeQName))
+                simulator.getProjectSimxInstanceOpener(instance, offered.map(r => r.key), () => undefined, false);
+        }
+        return creators;
     }
 
     /**
-     * Shows the editor tab that creates the instances of the fixed-instance type
-     * `typeQName` and asks it to create one, once it is ready; does nothing if no
-     * offered tab creates them.
+     * Shows the editor tab of `key`, one that creates the instances of the
+     * fixed-instance type `typeQName`, and asks it to create one, once it is
+     * ready; does nothing if `key` is not an offered tab that creates them.
      */
-    createSimxInstance(typeQName: string) {
-        const key = this.getSimxInstanceCreator(typeQName);
-        if (!key || !this.openSimxEditor(key)) return;
+    createSimxInstance(typeQName: string, key: string) {
+        if (!this.getSimxInstanceCreators(typeQName).some(r => r.key === key) || !this.openSimxEditor(key)) return;
         simulator.simxEditorHost?.requestAction(key, { type: SIMXEDITOR_MESSAGE_TYPE, event: "action", action: "create", qName: typeQName });
     }
 
@@ -921,21 +927,19 @@ export class ProjectView
      * Returns the key of the simulator extension whose editor tab opens the
      * fixed instance `instanceQName` and is offered here, or undefined if there
      * is none: the tab the instance's `editor` attribute names, when it has
-     * one; else the tab that creates the instances of the instance's type, when
-     * the open project's own code declares the instance in a file in that
-     * extension's folder, or in the folder of the repository of the extension
-     * declaring the instance's type when that extension depends on the
-     * declaring extension. The instance and its type are read from the API
-     * info the blocks were built from.
+     * one; else the first tab, in registration order, that creates the
+     * instances of the instance's type and opens the instance, as
+     * `projectSimxEditorOpensInstance` decides it. Call only for the dropdown
+     * of a type an offered tab creates. The instance and its type are read
+     * from the API info the blocks were built from.
      */
     getSimxInstanceOpener(instanceQName: string): string | undefined {
         const apis = pxtblockly.cachedBlockInfo?.apis.byQName;
         const instance = apis?.[instanceQName];
         if (!instance) return undefined;
-        return simulator.getProjectSimxInstanceOpener(instance, this.getSimxEditors().map(r => r.key), () => {
-            const key = this.getSimxInstanceCreator(instance.retType);
-            return key && simulator.projectSimxEditorOpensInstance(key, instance, apis[instance.retType]?.pkg) ? key : undefined;
-        });
+        return simulator.getProjectSimxInstanceOpener(instance, this.getSimxEditors().map(r => r.key), () =>
+            this.getSimxInstanceCreators(instance.retType).map(r => r.key)
+                .find(key => simulator.projectSimxEditorOpensInstance(key, instance, apis[instance.retType]?.pkg)), true);
     }
 
     /**
@@ -6815,8 +6819,8 @@ document.addEventListener("DOMContentLoaded", async () => {
     hash = parseHash();
     blocklyFieldView.init();
 
-    pxt.react.canCreateInstance = typeQName => !!theEditor?.getSimxInstanceCreator(typeQName);
-    pxt.react.createInstance = typeQName => theEditor?.createSimxInstance(typeQName);
+    pxt.react.getInstanceCreators = typeQName => (theEditor?.getSimxInstanceCreators(typeQName) || []).map(r => ({ id: r.key, label: r.label }));
+    pxt.react.createInstance = (typeQName, creatorId) => theEditor?.createSimxInstance(typeQName, creatorId);
     pxt.react.canOpenInstance = instanceQName => !!theEditor?.getSimxInstanceOpener(instanceQName);
     pxt.react.openInstance = instanceQName => theEditor?.openSimxInstance(instanceQName);
 

@@ -16,7 +16,7 @@
  * An extension whose registration names another registration's simulator
  * frame in `simulator` has a tab frame and no simulator frame of its own: its
  * tab talks to that registration's simulator frame instead. A simulator frame
- * may so talk to several tabs, its own and those of every registration naming
+ * may talk to several tabs, its own and those of every registration naming
  * it, each over a pair of its own.
  *
  * A tab lives for one load of its project: the editor removes the tab frame
@@ -57,7 +57,7 @@ export function getParentOrigin(search?: string): string | undefined {
  * succeeds: in a view that shows no extension tabs, it is answered with
  * `UNAVAILABLE`. The parameter reflects only the frame's own tab: a frame whose
  * tabs all belong to registrations naming it in `simulator` gets no `editor=1`,
- * and learns of those tabs through the tabs request, at API level 2 or above.
+ * and learns of those tabs through the tabs request.
  * @param search the frame URL's query string; defaults to `window.location.search`
  */
 export function hasEditorTab(search?: string): boolean {
@@ -66,17 +66,12 @@ export function hasEditorTab(search?: string): boolean {
 }
 
 /**
- * Returns the level of the simulator-extension APIs the editor hosting this
- * frame serves, which the editor passes in the frame URL's `apiLevel`
- * parameter. Level 1 is the `projfs`, `projassets`, `projprogram` and
- * `simxeditor` messages and the registration fields; each later level adds to
- * or alters them. Level 2 adds the `simulator` registration field, `peer` on
- * the `simxeditorport` message, `key` on the `simxeditor` open request, and
- * the `simxeditor` tabs request. Read it at startup to learn whether the
- * editor answers a request before sending it.
+ * Returns the simulator-extension API level the hosting editor serves, from
+ * the frame URL's `apiLevel` parameter. The API level table in
+ * pxtservices/simulator-extensions.md says what each level covers; read it at
+ * startup before sending a request a later level added.
  * @param search the frame URL's query string; defaults to `window.location.search`
- * @returns the level; 0, the level of an editor older than level 1, if the URL
- * provides none or one that is not a non-negative integer
+ * @returns the level, or 0 when the URL carries none or an invalid one
  */
 export function getSimxApiLevel(search?: string): number {
     const query = search !== undefined ? search : window.location.search;
@@ -141,10 +136,10 @@ export interface SimxEditorFullscreenEvent {
  * outside the tab for an action the tab carries out. `create` asks it to
  * create an instance of the fixed-instance type `qName`, one its
  * registration's `editor.creates` names; `open`, to open the fixed instance
- * `qName`, one the tab edits by the instance's `editor` attribute or, without
- * it, by the creator rule. Posted once the tab is ready: at once if it is,
- * else after the events that follow its ready event. A later request replaces
- * one not yet posted, and one not yet posted is dropped when the tab frame is
+ * `qName`, one the tab edits, posted only for an instance whose type some
+ * offered tab creates. Posted once the tab is ready: at once if it is, else
+ * after the events that follow its ready event. A later request replaces one
+ * not yet posted, and one not yet posted is dropped when the tab frame is
  * removed.
  */
 export interface SimxEditorActionEvent {
@@ -167,17 +162,12 @@ export type SimxEditorEvent =
     | SimxEditorActionEvent;
 
 /**
- * Posted to a tab frame and to the simulator frame it talks to (that of its
- * own key, or the one its registration's `simulator` names), each with one end
- * of a new `MessageChannel` in the event's `ports[0]`. The editor posts a new
- * pair whenever both frames exist and the tab is ready: when the tab becomes
- * ready while the simulator frame is loaded, and, for every ready tab that
- * talks to it, whenever a simulator frame finishes loading. A simulator frame
- * that several tabs talk to receives one pair per tab, told apart by `peer`. If
- * the simulator frame does not exist, the editor creates it each time it shows
- * one of its tabs and after the simulator unloads while one of its tabs exists,
- * and new pairs follow once it loads. Either side may close its port; a new
- * pair replaces it.
+ * Posted to a tab frame and to the simulator frame it talks to, each with one
+ * end of a new `MessageChannel` in the event's `ports[0]`. A new pair follows
+ * whenever both frames exist and the tab is ready: when the tab becomes ready,
+ * and whenever the simulator frame loads again. A simulator frame that several
+ * tabs talk to gets one pair per tab, told apart by `peer`; a new pair replaces
+ * the one with the same `peer`.
  */
 export interface SimxEditorPortMessage {
     type: typeof SIMXEDITOR_PORT_MESSAGE_TYPE;
@@ -204,8 +194,8 @@ export interface SimxEditorOpenRequest {
     subtype: "open";
     id: string;
     /**
-     * The key of the tab to show, one of the tabs the tabs request lists; the
-     * simulator frame's own key when absent.
+     * The key of the tab to show, one of those the tabs request lists, matched
+     * ignoring case; the frame's own tab when absent.
      */
     key?: string;
 }
@@ -220,6 +210,9 @@ export interface SimxEditorTabsRequest {
     subtype: "tabs";
     id: string;
 }
+
+/** A request a simulator frame posts to the editor. */
+export type SimxEditorRequest = SimxEditorOpenRequest | SimxEditorTabsRequest;
 
 /**
  * Why an open or tabs request failed. Clients branch on the code; the message
@@ -236,7 +229,7 @@ export type SimxEditorErrorCode =
     | "PERMISSION_DENIED"
     /** The editor shows no extension tabs in its current view, such as an embedded, read-only or tutorial view. */
     | "UNAVAILABLE"
-    /** The request is unknown or malformed, or the editor failed to carry it out. */
+    /** The request is unknown or malformed, its key matches several tabs, or the editor failed to carry it out. */
     | "INVALID_REQUEST";
 
 /** The reply to an open request the editor carried out. */

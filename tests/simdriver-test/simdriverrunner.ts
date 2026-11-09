@@ -723,7 +723,7 @@ describe("simulator driver simulator extension frames", () => {
     });
 
     it("passes the simulator-extension API level the editor serves to the frame in its URL", () => {
-        chai.expect(startSimulatorExtension().url.searchParams.get("apiLevel")).equals("2");
+        chai.expect(startSimulatorExtension().url.searchParams.get("apiLevel")).equals(pxsim.SIMX_API_LEVEL.toString());
     });
 
     it("passes the running target's id to the frame in its URL when the driver is given one", () => {
@@ -1141,6 +1141,51 @@ describe("simulator driver simulator extension editor tabs", () => {
                 chai.expect({ url, editorUrl, simulatorKey }).deep.equals({ url: undefined, editorUrl: undefined, simulatorKey: undefined });
             }
         });
+
+        it("refuses both registrations of a two-way simulator reference, logging each once", () => {
+            let h: Harness;
+            const errors = loggedErrors(() => h = harness({ [KEY]: registration({ ...TAB, simulator: REF }), [REF]: registration({ ...TAB, simulator: KEY }) }));
+            chai.expect(errors.length).equals(2);
+            chai.expect([KEY, REF].map(key => errors.filter(e => e.join(" ").indexOf(`simulator extension ${key}:`) >= 0).length)).deep.equals([1, 1]);
+            for (const key of [KEY, REF]) {
+                const { url, editorUrl, simulatorKey } = h.registrations[key];
+                chai.expect({ url, editorUrl, simulatorKey }, key).deep.equals({ url: undefined, editorUrl: undefined, simulatorKey: undefined });
+            }
+        });
+
+        it("refuses, logging once, a simulator that is not a non-empty string, and gives the registration no frame of its own", () => {
+            for (const simulator of ["", 7 as unknown as string]) {
+                let h: Harness;
+                const errors = loggedErrors(() => h = harness({ [KEY]: registration(), [REF]: registration({ ...TAB, simulator }) }));
+                chai.expect(errors.length, String(simulator)).equals(1);
+                chai.expect(errors[0].join(" ")).contains(`simulator extension ${REF}:`);
+                const { url, editorUrl, simulatorKey } = h.registrations[REF];
+                chai.expect({ url, editorUrl, simulatorKey }).deep.equals({ url: undefined, editorUrl: undefined, simulatorKey: undefined });
+                chai.expect(h.driver.startSimulatorExtension(REF)).equals(undefined);
+            }
+        });
+
+        it("matches the key a simulator names ignoring case, talks to the frame of the key as registered, and refuses a self-reference differing only in case", () => {
+            let h: Harness;
+            chai.expect(loggedErrors(() => h = harness({ [KEY]: registration(), [REF]: { ...TAB, simulator: "SomeOrg/PXT-Ext" } }))).deep.equals([]);
+            chai.expect(h.registrations[REF].simulatorKey).equals(KEY);
+            chai.expect(loggedErrors(() => harness({ [KEY]: registration(), [REF]: { ...TAB, simulator: "RefOrg/PXT-Ref" } })).length).equals(1);
+        });
+
+        it("refuses, logging once, a simulator matching two keys that differ only in case", () => {
+            let h: Harness;
+            const errors = loggedErrors(() => h = harness({ [KEY]: registration(), "SomeOrg/PXT-Ext": registration(), [REF]: { ...TAB, simulator: KEY } }));
+            chai.expect(errors.length).equals(1);
+            chai.expect(errors[0].join(" ")).contains(`simulator extension ${REF}:`);
+            const { url, editorUrl, simulatorKey } = h.registrations[REF];
+            chai.expect({ url, editorUrl, simulatorKey }).deep.equals({ url: undefined, editorUrl: undefined, simulatorKey: undefined });
+        });
+
+        it("adds no editor=1 to the URL of a simulator frame whose tabs all belong to registrations naming it", () => {
+            const h = harness({ [KEY]: registration(), [REF]: { ...TAB, simulator: KEY } });
+            chai.expect(h.registrations[REF].simulatorKey).equals(KEY);
+            chai.expect(simulatorFrameUrl(h).searchParams.has("editor")).equals(false);
+        });
     });
 
     describe("starting the simulator frame", () => {
@@ -1296,6 +1341,15 @@ describe("simulator driver simulator extension editor tabs", () => {
             chai.expect(opened).deep.equals([]);
         });
 
+        it("has its tabs request answered with UNREGISTERED, whichever simulator frame its tab talks to", () => {
+            const h = harness({ [KEY]: registration(TAB), [REF]: { ...TAB, simulator: KEY } }, { onSimxEditorMessage: () => chai.assert.fail("delivered") });
+            for (const key of [KEY, REF]) {
+                const tab = tabFrame(h, key);
+                receive(h, { type: "simxeditor", subtype: "tabs", id: "1" }, tab.contentWindow);
+                chai.expect(refusals(tab), key).deep.equals([{ type: "simxeditor", id: "1", subtype: "error", code: "UNREGISTERED" }]);
+            }
+        });
+
         it("has its open request answered with UNREGISTERED, and its own events left unanswered", () => {
             const h = harness({ [KEY]: registration(TAB) }, { onSimxEditorMessage: () => chai.assert.fail("delivered") });
             const tab = tabFrame(h, KEY);
@@ -1364,7 +1418,7 @@ describe("simulator driver simulator extension editor tabs", () => {
         it("reaches the handler, with the frame's key, from the simulator frame of a registration without a tab when another registration's tab talks to it", () => {
             const delivered: [string, string][] = [];
             const h = harness({ [KEY]: registration(), [REF]: registration({ ...TAB, simulator: KEY }) }, {
-                onSimxEditorMessage: (key, msg) => delivered.push([key, (msg as any).subtype]),
+                onSimxEditorMessage: (key, msg) => delivered.push([key, (msg as pxsim.SimulatorMessage & { subtype: string }).subtype]),
             });
             packet(h);
             const simulatorFrame = h.frames[1];
@@ -1387,6 +1441,45 @@ describe("simulator driver simulator extension editor tabs", () => {
                 { type: "simxeditor", id: "7", subtype: "error", code: "PERMISSION_DENIED" },
                 { type: "simxeditor", id: "8", subtype: "error", code: "PERMISSION_DENIED" },
             ]);
+        });
+
+        it("is refused with PERMISSION_DENIED from the simulator frame of a registration without a tab when the open project does not include the registration whose tab talks to it", () => {
+            const h = harness({ [KEY]: registration(), [REF]: registration({ ...TAB, simulator: KEY }) }, {
+                isSimxInProject: key => key !== REF,
+                onSimxEditorMessage: () => chai.assert.fail("delivered"),
+            });
+            packet(h);
+            const simulatorFrame = h.frames[1];
+            simulatorFrame.contentWindow.posts = [];
+            receive(h, { ...open, key: REF }, simulatorFrame.contentWindow);
+            receive(h, { type: "simxeditor", subtype: "tabs", id: "8" }, simulatorFrame.contentWindow);
+            chai.expect(refusals(simulatorFrame)).deep.equals([
+                { type: "simxeditor", id: "7", subtype: "error", code: "PERMISSION_DENIED" },
+                { type: "simxeditor", id: "8", subtype: "error", code: "PERMISSION_DENIED" },
+            ]);
+        });
+
+        it("is refused for the frame's own tab, named or not and in any case, as without a tab talking to the frame, while the other tabs' requests reach the handler", () => {
+            const broken = registration({ allowEditorTab: true, editor: { index: "", label: "Ext" } });
+            // the refusals the simulator frame of `registrations` gets for `requests`, with their messages
+            const answers = (registrations: pxt.Map<Registration>, requests: object[], delivered: string[] = []) => {
+                let h: Harness;
+                loggedErrors(() => h = harness(registrations, {
+                    onSimxEditorMessage: (key, msg) => delivered.push((msg as pxsim.SimulatorMessage & { subtype: string }).subtype),
+                }));
+                packet(h);
+                const simulatorFrame = h.frames[1];
+                simulatorFrame.contentWindow.posts = [];
+                requests.forEach(request => receive(h, request, simulatorFrame.contentWindow));
+                return simulatorFrame.contentWindow.messages;
+            };
+            const alone = answers({ [KEY]: broken }, [open]);
+            chai.expect(alone.map(m => (m as pxsim.SimulatorMessage & { code: string }).code)).deep.equals(["PERMISSION_DENIED"]);
+            const delivered: string[] = [];
+            const shared = answers({ [KEY]: broken, [REF]: registration({ ...TAB, simulator: KEY }) },
+                [open, { ...open, key: KEY }, { ...open, key: "SomeOrg/PXT-Ext" }, { ...open, key: REF }, { type: "simxeditor", subtype: "tabs", id: "8" }], delivered);
+            chai.expect(shared).deep.equals([alone[0], alone[0], alone[0]]);
+            chai.expect(delivered).deep.equals(["open", "tabs"]);
         });
 
         it("is refused with UNREGISTERED from the simulator frame of an extension the open project does not include", () => {

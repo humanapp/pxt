@@ -99,6 +99,7 @@ namespace pxsim {
         onStateChanged?: (state: SimulatorState) => void;
         onSimulatorReady?: () => void;
         onSimulatorCommand?: (msg: pxsim.SimulatorCommandMessage) => void;
+        onDriverCommand?: (command: "start" | "stop" | "restart") => void;
         onTopLevelCodeEnd?: () => void;
         onMuteButtonStateChange?: (state: "muted" | "unmuted" | "disabled") => void;
         simUrl?: string;
@@ -1045,6 +1046,14 @@ namespace pxsim {
         }
 
         public stop(unload = false, starting = false) {
+            if (!starting && this.state !== SimulatorState.Stopped && this.state !== SimulatorState.Unloaded) {
+                this.options.onDriverCommand?.("stop");
+            }
+            this.stopCore(unload, starting);
+        }
+
+        // Stops the simulator without reporting a "stop" command.
+        private stopCore(unload: boolean, starting: boolean) {
             if (this.state !== SimulatorState.Stopped && this.state !== SimulatorState.Unloaded) {
                 this.clearDebugger();
                 this.stopSound();
@@ -1241,6 +1250,7 @@ namespace pxsim {
         }
 
         public run(js: string, opts: SimulatorRunOptions = {}) {
+            this.options.onDriverCommand?.("start");
             this.setRunOptions(opts);
             this.runId = this.nextId();
             // store information
@@ -1274,7 +1284,8 @@ namespace pxsim {
         }
 
         public restart() {
-            this.stop();
+            this.options.onDriverCommand?.("restart");
+            this.stopCore(false, false);
             this.cleanupFrames();
             this.start();
         }

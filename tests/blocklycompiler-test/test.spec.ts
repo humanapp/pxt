@@ -13,6 +13,7 @@ import "./localization.spec";
 import "./workspaceResize.spec";
 import "./blockInjection.spec";
 import "./tutorialToolbox.spec";
+import "./gridpicker.spec";
 
 const WEB_PREFIX = "http://localhost:9876";
 
@@ -215,12 +216,48 @@ function getBlocksInfoAsync(): Promise<pxtc.BlocksInfo> {
         }, err => fail('Could not get compile options'))
 }
 
-async function blockTestAsync(name: string): Promise<void> {
-    await blockTestResultAsync(name);
+async function decompilePickerSource(source: string) {
+    await getBlocksInfoAsync();
+    const host = await BlocklyCompilerTestHost.createTestHostAsync();
+    const readFile = host.readFile.bind(host);
+    host.readFile = (pkg, name) => pkg.id === "this" && name === pxt.MAIN_TS ? source : readFile(pkg, name);
+    const options = await new pxt.MainPackage(host).getCompileOptionsAsync();
+    options.ast = true;
+    const compiled = pxtc.compile(options);
+    chai.assert.isTrue(compiled.success, JSON.stringify(compiled.diagnostics));
+    const info = pxtc.getBlocksInfo(pxtc.getApiInfo(compiled.ast, options.jres));
+    const result = pxtc.decompile(compiled.ast, options, pxt.MAIN_TS, true);
+    return { program: compiled.ast, info, result };
 }
 
-// Compiles the case `name` and checks its source against the baseline; returns the compilation result
-async function blockTestResultAsync(name: string): Promise<pxtblockly.BlockCompilationResult> {
+async function roundTripPickerSource(source: string): Promise<string> {
+    const { info, result } = await decompilePickerSource(source);
+    chai.assert.isTrue(result.success, JSON.stringify(result.diagnostics));
+    const workspace = new Blockly.Workspace();
+    try {
+        pxtblockly.domToWorkspaceNoEvents(Blockly.utils.xml.textToDom(result.outfiles[pxt.MAIN_BLOCKS]), workspace);
+        return (await pxtblockly.compileAsync(workspace, info)).source;
+    } finally {
+        workspace.dispose();
+    }
+}
+
+function sourceCalls(source: string): string[][] {
+    const file = ts.createSourceFile("calls.ts", source, ts.ScriptTarget.Latest, true);
+    const reference = (expression: ts.Expression): string => {
+        if (ts.isParenthesizedExpression(expression)) return reference(expression.expression);
+        if (ts.isIdentifier(expression)) return expression.text;
+        if (ts.isPropertyAccessExpression(expression)) return reference(expression.expression) + "." + expression.name.text;
+        throw new Error("Expected a selected API value");
+    };
+    return file.statements.filter(ts.isExpressionStatement).map(statement => {
+        const expression = statement.expression;
+        if (!ts.isCallExpression(expression)) throw new Error("Expected an API call");
+        return [reference(expression.expression), ...expression.arguments.map(reference)];
+    });
+}
+
+async function blockTestAsync(name: string, verify?: (result: pxtblockly.BlockCompilationResult) => Promise<void>) {
     let blocksFile: string;
     let tsFile: string;
     const blocklyOptions: Blockly.BlocklyOptions = {
@@ -293,7 +330,7 @@ async function blockTestResultAsync(name: string): Promise<pxtblockly.BlockCompi
     }
 
     chai.expect(compiledTs).to.equal(baselineTs, "Compiled result did not match baseline: " + name + " " + res.source);
-    return res;
+    if (verify) await verify(res);
 }
 
 describe("blockly compiler", function () {
@@ -489,6 +526,163 @@ describe("blockly compiler", function () {
     });
 
     describe("compiling text", () => {
+        it("should preserve field-level fixed instances and reject local-variable arguments", async () => {
+            const source = "pickerTest.chooseAsset(pickerAssets.allowed)";
+            const restored = await roundTripPickerSource(source);
+            chai.assert.deepEqual(sourceCalls(restored), sourceCalls(source), restored);
+            const { result } = await decompilePickerSource(
+                "let local = pickerAssets.allowed;\npickerTest.chooseAsset(local);");
+            const xml = Blockly.utils.xml.textToDom(result.outfiles[pxt.MAIN_BLOCKS]);
+            chai.assert.equal(xml.querySelectorAll('block[type="picker_choose_asset"]').length, 0);
+            chai.assert.isAtLeast(xml.querySelectorAll('block[type="typescript_statement"]').length, 1);
+        });
+
+        it("should keep indirect receivers of a field-level fixed-instance picker as TypeScript", async () => {
+            const direct = "pickerDevices.second.action()";
+            chai.assert.deepEqual(sourceCalls(await roundTripPickerSource(direct)), sourceCalls(direct));
+            const { result } = await decompilePickerSource("let device = pickerDevices.first;\ndevice.action();");
+            const xml = Blockly.utils.xml.textToDom(result.outfiles[pxt.MAIN_BLOCKS]);
+            chai.assert.equal(xml.querySelectorAll('block[type="picker_device_action"]').length, 0);
+            chai.assert.isAtLeast(xml.querySelectorAll('block[type="typescript_statement"]').length, 1);
+        });
+
+        it("should combine field options keyed by the parameter and block definition names", async () => {
+            const info = await getBlocksInfoAsync();
+            const param = pxt.blocks.compileInfo(info.apis.byQName["pickerTest.chooseMixed"]).actualNameToParam["value"];
+            chai.assert.deepEqual(param.fieldOptions, { enumNames: "PickerMonster", width: "300" });
+            const workspace = new Blockly.Workspace();
+            try {
+                chai.assert.equal(workspace.newBlock("picker_choose_mixed").getFieldValue("choice"), "PickerMonster.Zombie");
+            } finally {
+                workspace.dispose();
+            }
+        });
+
+        it("should treat fixedInstances=false as off", async () => {
+            const info = await getBlocksInfoAsync();
+            const param = pxt.blocks.compileInfo(info.apis.byQName["pickerTest.chooseDisabledAsset"]).actualNameToParam["value"];
+            chai.assert.isFalse(pxt.blocks.hasGridPickerFixedInstances(param));
+            chai.assert.isUndefined(pxt.blocks.getGridPickerDropdownValues(info.apis, param));
+        });
+
+        it("should select the option a constant alias default stands for", async () => {
+            await getBlocksInfoAsync();
+            const workspace = new Blockly.Workspace();
+            try {
+                chai.assert.equal(workspace.newBlock("picker_choose_alias").getFieldValue("choice"), "PickerAnimal.Cow");
+            } finally {
+                workspace.dispose();
+            }
+        });
+
+        it("should apply the selected source enum's constant-emission policy", async () => {
+            const source = [
+                "pickerTest.chooseItem(IRON_SHOVEL)",
+                "pickerTest.chooseItem(IRON_PICKAXE)",
+                "pickerTest.chooseItem(PickerAnimal.Chicken)"
+            ].join("\n");
+            const restored = await roundTripPickerSource(source);
+            chai.assert.deepEqual(sourceCalls(restored), sourceCalls(source), restored);
+        });
+
+        it("should generate picker snippets that compile back through their dropdown fields", async () => {
+            const { program, info } = await decompilePickerSource("");
+            const checker = program.getTypeChecker();
+            for (const qName of ["pickerTest.chooseMount", "pickerTest.chooseItem", "pickerTest.chooseAsset"]) {
+                let declaration: ts.FunctionDeclaration;
+                const visit = (node: ts.Node) => {
+                    if (ts.isFunctionDeclaration(node) && node.name) {
+                        const symbol = checker.getSymbolAtLocation(node.name);
+                        if (symbol && checker.getFullyQualifiedName(symbol) === qName) declaration = node;
+                    }
+                    ts.forEachChild(node, visit);
+                };
+                program.getSourceFiles().forEach(file => visit(file));
+                chai.assert.isDefined(declaration);
+                const snippet = pxtc.service.snippetStringify(pxtc.service.getSnippet({
+                    apis: info.apis, blocksInfo: info, checker, takenNames: {}
+                }, info.apis.byQName[qName], declaration));
+                const restored = await roundTripPickerSource(snippet);
+                chai.assert.deepEqual(sourceCalls(restored), sourceCalls(snippet), snippet + "\n=>\n" + restored);
+                const { result } = await decompilePickerSource(snippet);
+                const xml = Blockly.utils.xml.textToDom(result.outfiles[pxt.MAIN_BLOCKS]);
+                chai.assert.equal(xml.querySelectorAll('block[type="typescript_statement"]').length, 0);
+                chai.assert.equal(xml.querySelectorAll('block[type="' + info.apis.byQName[qName].attributes.blockId + '"]').length, 1);
+                const defaultWorkspace = new Blockly.Workspace();
+                try {
+                    const block = defaultWorkspace.newBlock(info.apis.byQName[qName].attributes.blockId);
+                    chai.assert.equal(xml.querySelector('field[name="choice"]').textContent, block.getFieldValue("choice"),
+                        "Block and text insertion must select the same default");
+                } finally {
+                    defaultWorkspace.dispose();
+                }
+            }
+        });
+
+        it("should round trip configured gridpicker enum sources and resolved parameter names", async () => {
+            await getBlocksInfoAsync();
+            const source = [
+                "pickerTest.chooseMount(PickerAnimal.Chicken);",
+                "pickerTest.chooseMount(PickerMonster.Husk);",
+                "pickerTest.chooseMount(pickerTest.mount(PickerAnimal.Cow));",
+                "pickerTest.chooseMount(PICKER_CHICKEN);"
+            ].join("\n");
+            const host = await BlocklyCompilerTestHost.createTestHostAsync();
+            const readFile = host.readFile.bind(host);
+            host.readFile = (pkg, name) => pkg.id === "this" && name === pxt.MAIN_TS ? source : readFile(pkg, name);
+            const options = await new pxt.MainPackage(host).getCompileOptionsAsync();
+            options.ast = true;
+            const compiled = pxtc.compile(options);
+            chai.assert.isTrue(compiled.success, JSON.stringify(compiled.diagnostics));
+            const info = pxtc.getBlocksInfo(pxtc.getApiInfo(compiled.ast, options.jres));
+            const decompiled = pxtc.decompile(compiled.ast, options, pxt.MAIN_TS, true);
+            chai.assert.isTrue(decompiled.success, JSON.stringify(decompiled.diagnostics));
+            const workspace = new Blockly.Workspace();
+            try {
+                pxtblockly.domToWorkspaceNoEvents(Blockly.utils.xml.textToDom(decompiled.outfiles[pxt.MAIN_BLOCKS]), workspace);
+                chai.assert.deepEqual(workspace.getBlocksByType("picker_choose_mount", false).map(block => block.getFieldValue("choice")), [
+                    "PickerAnimal.Chicken", "PickerMonster.Husk", "PickerAnimal.Cow", "PickerAnimal.Chicken"
+                ], decompiled.outfiles[pxt.MAIN_BLOCKS]);
+                const result = await pxtblockly.compileAsync(workspace, info);
+                chai.assert.deepEqual(sourceCalls(result.source), sourceCalls([
+                    "pickerTest.chooseMount(PickerAnimal.Chicken)",
+                    "pickerTest.chooseMount(PickerMonster.Husk)",
+                    "pickerTest.chooseMount(PickerAnimal.Cow)",
+                    "pickerTest.chooseMount(PickerAnimal.Chicken)"
+                ].join("\n")));
+            } finally {
+                workspace.dispose();
+            }
+        });
+
+        it("should constrain initial picker values without discarding restored enum choices", async () => {
+            await getBlocksInfoAsync();
+            const workspace = new Blockly.Workspace();
+            try {
+                const block = workspace.newBlock("picker_choose_mount");
+                chai.assert.equal(block.getFieldValue("choice"), "PickerMonster.Zombie");
+                block.setFieldValue("PickerAnimal.Chicken", "choice");
+                chai.assert.equal(block.getFieldValue("choice"), "PickerAnimal.Chicken");
+            } finally {
+                workspace.dispose();
+            }
+        });
+
+        it("should reject values outside configured gridpicker enum sources", async () => {
+            const host = await BlocklyCompilerTestHost.createTestHostAsync();
+            const readFile = host.readFile.bind(host);
+            host.readFile = (pkg, name) => pkg.id === "this" && name === pxt.MAIN_TS
+                ? "pickerTest.chooseMount(PickerUnsupported.Other);\npickerTest.chooseMount(42);" : readFile(pkg, name);
+            const options = await new pxt.MainPackage(host).getCompileOptionsAsync();
+            options.ast = true;
+            const compiled = pxtc.compile(options);
+            chai.assert.isTrue(compiled.success, JSON.stringify(compiled.diagnostics));
+            const decompiled = pxtc.decompile(compiled.ast, options, pxt.MAIN_TS, true);
+            const xml = Blockly.utils.xml.textToDom(decompiled.outfiles[pxt.MAIN_BLOCKS]);
+            chai.assert.equal(xml.querySelectorAll('block[type="picker_choose_mount"]').length, 0);
+            chai.assert.isAtLeast(xml.querySelectorAll('block[type="typescript_statement"]').length, 1);
+        });
+
         it("should initialize color picker shadows in the parameter's requested mode", async () => {
             const info = await getBlocksInfoAsync();
             const coloredInfo = {
@@ -676,6 +870,250 @@ describe("blockly compiler", function () {
     });
 
     describe("compiling functions", () => {
+        describe("inferring array parameter elements", () => {
+            const element = `<block type="lists_index_get">
+                <value name="LIST"><block type="argument_reporter_array"><field name="VALUE">list</field></block></value>
+                <value name="INDEX"><shadow type="math_number"><field name="NUM">0</field></shadow></value>
+            </block>`;
+            const log = `<block type="console_log"><value name="text">${element}</value>`;
+            const setPosition = `<block type="spritesetpos">
+                <value name="sprite">${element}</value>
+                <value name="x"><shadow type="math_number"><field name="NUM">0</field></shadow></value>
+                <value name="y"><shadow type="math_number"><field name="NUM">0</field></shadow></value>`;
+            const setValue = `<block type="StatusBarSprite_blockCombine_set">
+                <field name="property">StatusBarSprite.value@set</field>
+                <value name="statusbar">${element}</value>
+                <value name="value"><shadow type="math_number"><field name="NUM">1</field></shadow></value>`;
+            const push = `<block type="array_push">
+                <value name="list"><block type="argument_reporter_array"><field name="VALUE">list</field></block></value>
+                <value name="value">${element}</value>`;
+            const createStatusBar = `<block type="statusbars_create">
+                <value name="width"><shadow type="math_number"><field name="NUM">20</field></shadow></value>
+                <value name="height"><shadow type="math_number"><field name="NUM">4</field></shadow></value>
+                <value name="kind"><shadow type="math_number"><field name="NUM">0</field></shadow></value>
+            </block>`;
+            const arrayOf = (item: string) => `<block type="lists_create_with">
+                <mutation items="1"/>
+                <value name="ADD0">${item}</value>
+            </block>`;
+            const callTest = (argument: string) => `<block type="function_call">
+                <mutation name="test" functionid="test">
+                    <arg name="list" id="list-parameter" type="Array"/>
+                </mutation>
+                <value name="list-parameter">${argument}</value>
+            </block>`;
+
+            async function testArrayParameterAsync(body: string, expected: string, extraBlocks = "", expectedDiagnosticCodes: number[] = []): Promise<void> {
+                const info = await getBlocksInfoAsync();
+                const workspace = new Blockly.Workspace();
+                try {
+                    pxtblockly.domToWorkspaceNoEvents(Blockly.utils.xml.textToDom(`
+                        <xml xmlns="https://developers.google.com/blockly/xml">
+                            <variables><variable id="sprite">sprite</variable><variable id="value">value</variable><variable id="statusbar">statusbar</variable></variables>
+                            <block type="function_definition">
+                                <mutation name="test" functionid="test">
+                                    <arg name="list" id="list-parameter" type="Array"/>
+                                </mutation>
+                                <field name="function_name">test</field>
+                                <value name="list-parameter">
+                                    <shadow type="argument_reporter_array"><field name="VALUE">list</field></shadow>
+                                </value>
+                                <statement name="STACK">${body}</statement>
+                            </block>
+                            ${extraBlocks}
+                        </xml>`), workspace);
+                    const result = await pxtblockly.compileAsync(workspace, info);
+                    chai.expect(result.diagnostics.length).to.equal(0);
+                    chai.expect(result.source.trim().replace(/\s+/g, " ")).to.equal(expected.trim().replace(/\s+/g, " "));
+
+                    const host = await BlocklyCompilerTestHost.createTestHostAsync();
+                    const options = await new pxt.MainPackage(host).getCompileOptionsAsync();
+                    options.fileSystem[pxt.MAIN_TS] = result.source;
+                    const compiled = pxtc.compile(options);
+                    chai.expect(compiled.diagnostics.map(diagnostic => diagnostic.code)).to.deep.equal(expectedDiagnosticCodes);
+                    chai.expect(compiled.success).to.equal(expectedDiagnosticCodes.length === 0);
+                }
+                finally {
+                    workspace.dispose();
+                }
+            }
+
+            it("should preserve Sprite assignments after an unconstrained read and a for-of loop", async () => {
+                await testArrayParameterAsync(`
+                    ${log}
+                        <next><block type="controls_for_of">
+                            <field name="VAR" id="value">value</field>
+                            <value name="LIST"><block type="argument_reporter_array"><field name="VALUE">list</field></block></value>
+                            <next><block type="spritesetpos">
+                                <value name="sprite"><block type="variables_get"><field name="VAR" id="sprite">sprite</field></block></value>
+                                <value name="x"><shadow type="math_number"><field name="NUM">0</field></shadow></value>
+                                <value name="y"><shadow type="math_number"><field name="NUM">0</field></shadow></value>
+                                <next><block type="variables_set">
+                                    <field name="VAR" id="sprite">sprite</field>
+                                    <value name="VALUE">${element}</value>
+                                </block></next>
+                            </block></next>
+                        </block></next>
+                    </block>`, `
+                    let sprite: Sprite = null
+                    function test (list: Sprite[]) {
+                        console.log("" + (list[0]))
+                        for (let value of list) {
+                        }
+                        sprite.setPosition(0, 0)
+                        sprite = list[0]
+                    }`);
+            });
+
+            it("should fall back to any[] for unresolved nested array elements", async () => {
+                await testArrayParameterAsync(`
+                    ${log}
+                        <next><block type="array_reverse"><value name="list">${element}</value></block></next>
+                    </block>`, `
+                    function test (list: any[]) {
+                        console.log("" + (list[0]))
+                        list[0].reverse()
+                    }`);
+            });
+
+            for (const withPush of [false, true]) {
+                it(`should infer Sprite[] from base-only ${withPush ? "and generic " : ""}operations even when passed status bars`, async () => {
+                    await testArrayParameterAsync(`
+                        ${log}<next>${setPosition}
+                            ${withPush ? `<next>${push}</block></next>` : ""}
+                        </block></next></block>`, `
+                        function test (list: Sprite[]) {
+                            console.log("" + (list[0]))
+                            list[0].setPosition(0, 0)
+                            ${withPush ? "list.push(list[0])" : ""}
+                        }
+                        test([statusbars.create(20, 4, 0)])`, `
+                        <block type="pxt-on-start"><statement name="HANDLER">
+                            ${callTest(arrayOf(createStatusBar))}
+                        </statement></block>`);
+                });
+            }
+
+            it("should reject plain sprites passed to an array function that assigns to a status-bar variable", async () => {
+                const plainSprite = `<block type="lists_index_get">
+                    <value name="LIST"><block type="test_all_sprites"/></value>
+                    <value name="INDEX"><shadow type="math_number"><field name="NUM">0</field></shadow></value>
+                </block>`;
+                await testArrayParameterAsync(`
+                    ${log}<next><block type="variables_set">
+                        <field name="VAR" id="statusbar">statusbar</field>
+                        <value name="VALUE">${element}</value>
+                        <next>${setPosition}</block></next>
+                    </block></next></block>`, `
+                    function test (list: StatusBarSprite[]) {
+                        console.log("" + (list[0]))
+                        statusbar = list[0]
+                        list[0].setPosition(0, 0)
+                    }
+                    let statusbar: StatusBarSprite = null
+                    statusbar = statusbars.create(20, 4, 0)
+                    test([testTypes.allSprites()[0]])`, `
+                    <block type="pxt-on-start"><statement name="HANDLER">
+                        <block type="variables_set">
+                            <field name="VAR" id="statusbar">statusbar</field>
+                            <value name="VALUE">${createStatusBar}</value>
+                            <next>${callTest(arrayOf(plainSprite))}</next>
+                        </block>
+                    </statement></block>`, [2345]);
+            });
+
+            for (const subclassFirst of [false, true]) {
+                it(`should retain subclass receiver constraints with the ${subclassFirst ? "subclass" : "base"} method first`, async () => {
+                    const first = subclassFirst ? setValue : setPosition;
+                    const second = subclassFirst ? setPosition : setValue;
+                    const positionSource = "list[0].setPosition(0, 0)";
+                    const valueSource = "list[0].value = 1";
+                    await testArrayParameterAsync(`
+                        ${log}<next>${first}<next>${second}</block></next></block></next></block>`, `
+                        function test (list: StatusBarSprite[]) {
+                            console.log("" + (list[0]))
+                            ${subclassFirst ? valueSource : positionSource}
+                            ${subclassFirst ? positionSource : valueSource}
+                        }`);
+                });
+            }
+
+            for (const subclassFirst of [false, true]) {
+                it(`should retain subclass argument constraints with the ${subclassFirst ? "subclass" : "base"} call first`, async () => {
+                    const call = (name: string, type: string) => `<block type="function_call">
+                        <mutation name="${name}" functionid="${name}">
+                            <arg name="value" id="${name}-argument" type="${type}"/>
+                        </mutation>
+                        <value name="${name}-argument">${element}</value>`;
+                    const definition = (name: string, type: string) => `<block type="function_definition">
+                        <mutation name="${name}" functionid="${name}">
+                            <arg name="value" id="${name}-argument" type="${type}"/>
+                        </mutation>
+                        <field name="function_name">${name}</field>
+                        <value name="${name}-argument">
+                            <shadow type="argument_reporter_custom">
+                                <mutation typename="${type}"/>
+                                <field name="VALUE">value</field>
+                            </shadow>
+                        </value>
+                    </block>`;
+                    const base = call("takeSprite", "Sprite");
+                    const subclass = call("takeStatusBar", "StatusBarSprite");
+                    await testArrayParameterAsync(`
+                        ${log}<next>${subclassFirst ? subclass : base}
+                            <next>${subclassFirst ? base : subclass}</block></next>
+                        </block></next></block>`, `
+                        function takeSprite (value: Sprite) {
+                        }
+                        function test (list: StatusBarSprite[]) {
+                            console.log("" + (list[0]))
+                            ${subclassFirst ? "takeStatusBar" : "takeSprite"}(list[0])
+                            ${subclassFirst ? "takeSprite" : "takeStatusBar"}(list[0])
+                        }
+                        function takeStatusBar (value: StatusBarSprite) {
+                        }`, definition("takeSprite", "Sprite") + definition("takeStatusBar", "StatusBarSprite"));
+                });
+
+                it(`should preserve child refinements with push ${subclassFirst ? "after" : "before"} the subclass constraint`, async () => {
+                    await testArrayParameterAsync(`
+                        ${log}<next>${setPosition}
+                            <next>${subclassFirst ? setValue : push}
+                                <next>${subclassFirst ? push : setValue}</block></next>
+                            </block></next>
+                        </block></next></block>`, `
+                        function test (list: StatusBarSprite[]) {
+                            console.log("" + (list[0]))
+                            list[0].setPosition(0, 0)
+                            ${subclassFirst ? "list[0].value = 1" : "list.push(list[0])"}
+                            ${subclassFirst ? "list.push(list[0])" : "list[0].value = 1"}
+                        }`);
+                });
+
+                it(`should retain subclass assignments with the ${subclassFirst ? "assignment" : "base method"} first`, async () => {
+                    const assignment = `<block type="variables_set">
+                        <field name="VAR" id="statusbar">statusbar</field>
+                        <value name="VALUE">${element}</value>`;
+                    await testArrayParameterAsync(`
+                        ${log}<next>${subclassFirst ? assignment : setPosition}
+                            <next>${subclassFirst ? setPosition : assignment}</block></next>
+                        </block></next></block>`, `
+                        function test (list: StatusBarSprite[]) {
+                            console.log("" + (list[0]))
+                            ${subclassFirst ? "statusbar = list[0]" : "list[0].setPosition(0, 0)"}
+                            ${subclassFirst ? "list[0].setPosition(0, 0)" : "statusbar = list[0]"}
+                        }
+                        let statusbar: StatusBarSprite = null
+                        statusbar = statusbars.create(20, 4, 0)`, `
+                        <block type="pxt-on-start"><statement name="HANDLER">
+                            <block type="variables_set">
+                                <field name="VAR" id="statusbar">statusbar</field>
+                                <value name="VALUE">${createStatusBar}</value>
+                            </block>
+                        </statement></block>`);
+                });
+            }
+        });
+
         it("should handle name collisions", (done: () => void) => {
             blockTestAsync("functions_names").then(done, done);
         });
@@ -747,6 +1185,26 @@ describe("blockly compiler", function () {
         it("should perform type inference on array arguments", (done: () => void) => {
             blockTestAsync("array_parameter_type_inference").then(done, done);
         })
+
+        it("should infer array parameter elements used by a method after an unconstrained read", async () => {
+            await blockTestAsync("array_parameter_element_inference", async result => {
+                chai.expect(result.diagnostics.length).to.equal(0);
+
+                const host = await BlocklyCompilerTestHost.createTestHostAsync();
+                const options = await new pxt.MainPackage(host).getCompileOptionsAsync();
+                options.fileSystem[pxt.MAIN_TS] = result.source;
+                const python = pxtc.service.performOperation("pydecompile", {
+                    options,
+                    fileName: pxt.MAIN_TS
+                }) as pxtc.transpile.TranspileResult;
+
+                chai.expect(python.diagnostics.length).to.equal(0);
+                chai.expect(python.success).to.equal(true);
+                chai.expect(python.outfiles[pxt.MAIN_PY]).to.contain("List[Sprite]");
+                chai.expect(python.outfiles[pxt.MAIN_PY]).to.contain(".set_position(");
+                chai.expect(python.outfiles[pxt.MAIN_PY]).not.to.contain(".setPosition(");
+            });
+        });
     });
 
     describe("compiling special blocks", () => {
@@ -781,8 +1239,9 @@ describe("blockly compiler", function () {
 
     describe("compiling instance dropdowns", () => {
         it("should report a block holding a reserved value and emit null in its place", async () => {
-            const res = await blockTestResultAsync("instance_dropdown_reserved");
-            chai.expect(res.diagnostics.map(d => d.blockId)).to.deep.equal(["useThingBlock"]);
+            await blockTestAsync("instance_dropdown_reserved", async res => {
+                chai.expect(res.diagnostics.map(d => d.blockId)).to.deep.equal(["useThingBlock"]);
+            });
         });
     });
 

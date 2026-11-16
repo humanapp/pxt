@@ -53,7 +53,7 @@ export function getSimxChannel(channel?: string, search?: string): string | unde
 /**
  * Returns the origin of the editor hosting this simulator extension's frame,
  * e.g. `https://arcade.makecode.com`, which the editor passes in the frame
- * URL's `parentOrigin` parameter. Post requests to it.
+ * URL's `parentOrigin` parameter. Requests should be posted to this origin.
  * @param search the frame URL's query string; defaults to `window.location.search`
  * @returns the origin, or undefined if the URL provides none
  */
@@ -105,10 +105,6 @@ export function getSimxApiLevel(search?: string): number {
     return value !== null && /^[0-9]+$/.test(value) ? Number(value) : 0;
 }
 
-/**
- * Why a request failed. Clients branch on the code; the message that
- * accompanies it is for people.
- */
 export type ProjfsErrorCode =
     /**
      * Reads: the extension's folder has no file of that name that pxt.json

@@ -21,19 +21,19 @@ import {
 } from "./simxRequests";
 
 /**
- * The most bytes the files under one simulator extension folder may hold: the
- * UTF-8 bytes of each file's content plus those of its name relative to the
- * folder.
+ * The maximum size of a simulator extension's project folder. Each file's size is
+ * measured by the total UTF-8 bytes of the file's content plus those of its name
+ * relative to the extension's project folder.
  */
 export const PROJFS_FOLDER_QUOTA_BYTES = 512 * 1024;
 
 /** The most files one simulator extension folder may store. */
 export const PROJFS_MAX_FOLDER_FILES = 256;
 
-/** The most characters of a name a write gives a file, relative to its folder. */
+/** The maximum length of a project file name. All names are relative to the simx project folder. */
 export const PROJFS_MAX_NAME_LENGTH = 128;
 
-/** The most `/`-separated segments of a name a write gives a file, relative to its folder. */
+/** The maximum directory depth of a file relative to the simx folder. */
 export const PROJFS_MAX_NAME_SEGMENTS = 8;
 
 /**
@@ -80,7 +80,7 @@ export interface ProjfsProject {
     loadedAsync(): Promise<void>;
     /** Every file stored in the project, keyed by name, whether or not pxt.json lists it. */
     getFiles(): pxt.Map<string>;
-    /** Creates or replaces a stored file; a text editor showing the file shows the new content. Leaves pxt.json unchanged. */
+    /** Creates or replaces a stored file. Leaves pxt.json unchanged. */
     writeFileAsync(name: string, content: string): Promise<void>;
     /**
      * Deletes a stored file and removes it from the "files" and "testFiles"
@@ -139,13 +139,11 @@ export interface ProjfsEditor {
 }
 
 /**
- * Makes a change already saved to the project file `name` take effect as a user
- * edit would, through the same editor entry points. The editor showing the
- * file shows `content`; replacing the text editor's content resets its undo
- * history and cursor. The simulator is marked as running outdated code, and a
- * typecheck is scheduled; the editor's own debouncing merges the typechecks,
- * and so the reruns, of changes that arrive in quick succession. The toolbox
- * is left alone and picks up new blocks the next time it loads.
+ * Applies the changes to a file as if a user had made the edit. This does not
+ * edit the project files, and should only be called after the file changes have
+ * already been written. Calling this will overwrite the contents of the current
+ * blocks/text editor, trigger a simulator restart, and a typecheck just as a user
+ * change would. The toolbox is not updated by this function.
  * @param content the file's new content, or undefined if it was deleted
  */
 export function applyUserEdit(editor: ProjfsEditor, name: string, content: string | undefined): void {
@@ -161,8 +159,8 @@ export function applyUserEdit(editor: ProjfsEditor, name: string, content: strin
 export interface ProjfsPackageFile {
     /**
      * Replaces the file's content and saves it.
-     * @param force if true, the text editor reloads the file it shows, and
-     * the promise settles once it has
+     * @param force if true, any open text editor will reload its current
+     *  file and the promise will settle once the reload is complete.
      */
     setContentAsync(content: string, force?: boolean): Promise<void>;
 }
@@ -179,11 +177,8 @@ export interface ProjfsPackage {
 
 /**
  * Creates or replaces the stored file `name` of `epkg` and saves it. If the
- * text editor shows the file, it reloads to show `content`, which replaces any
- * change not yet saved from it and resets its undo history and cursor; the
- * promise then settles once the editor shows `content`. Only a write to the
- * shown file forces that reload: forcing any other write would discard the
- * shown file's unsaved changes.
+ * file is currently open in a text editor, also reloads the current text editor
+ * to show the new content and waits for the reload to complete.
  * @param editor the editor showing the project, or undefined if there is none
  */
 export function writeProjectFileAsync(epkg: ProjfsPackage, editor: ProjfsEditor | undefined, name: string, content: string): Promise<void> {
@@ -206,10 +201,10 @@ export function isValidRelativeName(name: unknown): name is string {
 
 /**
  * Returns the project folder of the simulator extension registered under
- * `key`: the root of its GitHub repository, `owner/repo` in lower case,
- * whatever subfolder `key` names, so every registration of one repository
- * shares the folder. Returns undefined if `key` names no repository, or the
- * folder would fall under `pxt_modules/`.
+ * `key`. This folder generally follows the format `owner/repo/subfolder` where
+ * subfolder is only present if this is not the root extension in the GitHub repo.
+ * Returns undefined if `key` names no repository, or the folder would fall
+ * under `pxt_modules/`.
  * @param key the simulator extension's key, e.g. `owner/repo` or `owner/repo/sub`
  */
 export function getProjfsFolder(key: string): string | undefined {
@@ -218,9 +213,9 @@ export function getProjfsFolder(key: string): string | undefined {
 }
 
 /**
- * Returns true if the open project's own code declares `symbol` in a file in
- * `folder`: the symbol comes from no package, and its file name, the file's
- * project name, lies under `folder`.
+ * Returns true if the given symbol is declared in the open project in a file
+ * that exists within the given `folder`. Returns false for any symbols declared
+ * in project dependencies.
  * @param symbol the symbol, as the API info gives it
  * @param folder a simulator extension's folder, e.g. `owner/repo`, as {@link getProjfsFolder} returns it
  */
@@ -243,12 +238,12 @@ export function getFolderFileName(folder: string, name: unknown): string | undef
 }
 
 /**
- * Returns true if a write may give a file the name `name`, relative to its
- * folder: the file explorer accepts it for a new file (see
- * `pxt.isValidProjectFileName`), it has at most
- * {@link PROJFS_MAX_NAME_LENGTH} characters in at most
- * {@link PROJFS_MAX_NAME_SEGMENTS} segments, and its last segment is not
- * `pxt.json` and does not end in `.jres`, in any letter case.
+ * Validates a filename to ensure it:
+ *   1. Contains no invalid characters
+ *   2. Does not exceed the max file name length
+ *   3. Does not exceed the max directory depth
+ *   4. Is not named `pxt.json`
+ *   5. Is not a `.jres` file.
  */
 function isWritableName(name: string): boolean {
     const segments = name.split("/");
@@ -261,7 +256,7 @@ function isWritableName(name: string): boolean {
 }
 
 /**
- * Returns the names in a list of the project's pxt.json.
+ * Returns either the `files` or `testFiles` listed in a project's pxt.json.
  * @param list the list to read: `files` (the default) or `testFiles`
  */
 function getListedFiles(files: pxt.Map<string>, list: "files" | "testFiles" = "files"): string[] {
@@ -363,52 +358,10 @@ interface ProjfsWatchedFolder {
 const APPLY_LANE = "apply";
 
 /**
- * Serves the project-file requests of simulator extensions. Each extension
- * lists, reads, writes and deletes files in its folder (see
- * {@link getProjfsFolder}), by names relative to that folder; within the
- * folder it lists and reads only the files pxt.json lists. Every
- * registration of one repository, and both frames of each, share the
- * folder, its quota, its rate limit and its queue.
- *
- * Every request gets one reply, and the replies for one folder are sent in
- * the order its requests arrive, a subscribe request's excepted. One request
- * applies at a time, and each folder's requests apply in the order they
- * arrive. A folder's writes and deletes beyond {@link PROJFS_RATE_LIMIT}
- * within {@link PROJFS_RATE_WINDOW_MS} wait, with the requests behind them,
- * until the window allows them. A request applies only to the project open
- * when it arrived, once that project has loaded; if that project fails to
- * load, or has closed by the time the request's turn comes, it is refused
- * with `PROJECT_CLOSED`, and a request that has begun applying is applied in
- * the project it began in.
- *
- * A request is refused on arrival, without waiting its turn, with
- * `RATE_LIMITED` when {@link PROJFS_MAX_PENDING_REQUESTS} requests on its
- * folder already wait for replies, and with `QUOTA_EXCEEDED` when it writes
- * more content than {@link PROJFS_FOLDER_QUOTA_BYTES}; its reply still
- * follows the replies to the requests before it.
- *
- * Writes and deletes are artifacts unless flagged `dirty`, in which case they
- * also pass through {@link ProjfsProject.markDirty} once applied, if their
- * project is still open; a flagged change whose project closed while it was
- * being applied stays applied in that project and is refused with
- * `PROJECT_CLOSED`.
- *
- * A subscribe request subscribes the requesting frame to its folder's
- * changes. It is neither queued nor limited: it is answered once the project
- * open when it arrived has loaded. A frame holds at most one subscription,
- * which ends when the project it was made in closes, or when the frame is
- * removed. The host listens to one project at a time, the one its
- * subscriptions were made in, and lets go of it when it closes. A folder's
- * subscribers are told the names, relative to the folder, of the files whose
- * content, existence or listing in pxt.json changed: the names the project's
- * change listener reports under the folder, then, after a pxt.json change or
- * a replacement of every file, the names whose stored state differs from the
- * one last notified. Changes are merged per folder: subscribers get one
- * notification for all the changes made before it is sent, sent
- * {@link PROJFS_NOTIFY_DEBOUNCE_MS} after the last of them, or
- * {@link PROJFS_NOTIFY_MAX_DELAY_MS} after the first if that is sooner, and
- * none when the changes leave no name to report. A notification pending when
- * the project closes is not sent.
+ * Handles "projfs" requests from simulator extensions. Lets each extension
+ * list, read, write and delete the project files within its folder, and sends
+ * notifications when those files change. See pxtservices/simulator-extensions.md
+ * for the protocol, limits and error codes.
  */
 export class ProjfsHost {
     // per folder: the requests received for the folder, each until it has been
@@ -620,7 +573,7 @@ export class ProjfsHost {
         this.watched = { project, folders: {} };
     }
 
-    /** Starts comparing the files of `folder` in the watched project with their state as of now, unless it already does. */
+    /** Starts comparing the files of `folder` in the watched project with their state as of now. No-op if already watching */
     protected watchFolder(folder: string) {
         const watched = this.watched;
         if (!watched || Object.prototype.hasOwnProperty.call(watched.folders, folder)) return;

@@ -2,21 +2,15 @@
  * The project-asset ("projassets") messages a simulator extension exchanges
  * with the editor, and a client that wraps them in promises.
  *
- * A simulator extension registered with `allowAssetRead` can list the named
- * assets of the project open in the editor, with the project's name and its
- * visual configuration (its palette and simulator theme), and subscribe to
- * hear when any of them changes. The editor answers from the project as it
- * is when the request arrives, including edits not yet built into the
- * project's files. Assets, name and configuration are read-only through
- * this API.
+ * A simulator extension registered with `allowAssetRead` can list project
+ * assets and subscribe to any changes. Assets, name and configuration are
+ * read-only through this API.
  *
  * Requests are posted to the editor window; the editor replies to each request
  * once, to the requesting frame only, with the request's `id`. Change
  * notifications carry no `id` and go to the frames that subscribed. A frame
  * holds at most one subscription, which lasts until the project it was made
- * in closes or reloads. The editor then removes the extension's frames,
- * whose pages hear `pagehide`, and creates new ones as the next load needs
- * them, so a page subscribes once.
+ * in closes or reloads.
  *
  * This module has no dependencies; a simulator extension can import or copy it
  * as-is.
@@ -28,7 +22,7 @@ export const PROJASSETS_MESSAGE_TYPE = "projassets";
 /**
  * Returns the origin of the editor hosting this simulator extension's frame,
  * e.g. `https://arcade.makecode.com`, which the editor passes in the frame
- * URL's `parentOrigin` parameter. Post requests to it.
+ * URL's `parentOrigin` parameter. Requests should be posted to this origin.
  * @param search the frame URL's query string; defaults to `window.location.search`
  * @returns the origin, or undefined if the URL provides none
  */
@@ -51,13 +45,9 @@ export function getSimxApiLevel(search?: string): number {
     return value !== null && /^[0-9]+$/.test(value) ? Number(value) : 0;
 }
 
-/** A kind of asset the editor lists: the name of one of pxt's asset types. */
+/** A pxt asset type. Duplicated from the AsssetType enum in pxtlib */
 export type ProjassetsKind = "image" | "tile" | "tilemap" | "animation" | "song" | "json";
 
-/**
- * Why a request failed. Clients branch on the code; the message that
- * accompanies it is for people.
- */
 export type ProjassetsErrorCode =
     /** The editor does not list assets of the requested kind. */
     | "UNSUPPORTED_KIND"
@@ -96,9 +86,7 @@ interface ProjassetsMessage {
 
 /**
  * Lists the project's named assets of one kind. The reply is a
- * {@link ProjassetsAssetsReply}. The editor answers the list requests of the
- * extensions of one GitHub repository in the order they arrive, at most 30
- * within any 10 seconds; later ones wait for their turn.
+ * {@link ProjassetsAssetsReply}
  */
 export interface ProjassetsListRequest extends ProjassetsMessage {
     subtype: "list";
@@ -144,14 +132,13 @@ export interface ProjassetsImage {
 /**
  * A tile asset of the project, for its tilemaps. The project's tiles include
  * the blank tile the editor generates for each tile width, such as
- * `myTiles.transparency16` for 16-pixel tiles.
+ * `myTiles.transparency16` for 16x16 tiles.
  */
 export interface ProjassetsTile {
     kind: "tile";
     /**
      * The tile's qualified id, as the project's tilemaps reference it, e.g.
-     * `myTiles.tile1`. Tilesets reference tiles by qualified id, and tiles
-     * supplied by extensions have no other.
+     * `myTiles.tile1`. Tilemaps reference tiles using this id.
      */
     id: string;
     /** The name the user gave the tile; absent if it has none. */
@@ -203,12 +190,17 @@ export interface ProjassetsTilemap {
     /**
      * The tilemap in pxt's tilemap encoding (MIME type
      * `application/mkcd-tilemap`), as the project's tileset file stores it:
-     * the bytes written as hexadecimal text, then base64-encoded. The bytes
-     * are the tile width in pixels; the width and then the height in tiles,
-     * each 16 bits, little-endian; one byte per cell, row by row, holding the
-     * index in `tileset` of the tile the cell shows; then the walls, 4
-     * bits per cell, row by row, two cells per byte with the first in the low
-     * bits, nonzero for a wall.
+     * the bytes written as hexadecimal text, then base64-encoded. The format
+     * is as follows:
+     * 
+     *     [0]  The tile width
+     *     [1..2]   Width of the tilemap in tiles
+     *     [3..4]   Height of the tilemap in tiles
+     *     [5..N]   Tile indices, row-major order, each location represented by a single byte
+     *     [N+1..]  Wall data, row-major order, each location represented by 4 bits
+     * 
+     * When reading wall data, a value of 2 represents that a location is a wall. The length of
+     * the tile indices and wall sections can be determined from the width and height of the tilemap.
      */
     data: string;
     /** The tiles the map's cells index, in order. */
@@ -291,16 +283,17 @@ export interface ProjassetsVisualConfig {
     /**
      * The project's palette, as the editor draws the project's images: the
      * project's own palette if its pxt.json sets one, else the target's. Each
-     * entry is a color as `#rrggbb`; a pixel value is an index into it. Any
-     * length, including empty for a target without a palette.
+     * entry is a color in `#rrggbb` format. Should always contain 16 colors,
+     * with the entry at index 0 representing transparency.
      */
     palette: string[];
     /**
-     * The simulator theme the project shows, as the editor resolves it: the
-     * project's own theme if its pxt.json declares one, resolved over the
-     * user's, else the user's. Maps each token (e.g. `background-color`) to
-     * its value, a color as `#rrggbb`, and `layout` to the simulator layout's
-     * id. Absent if the target offers no simulator themes.
+     * The simulator theme for the project, if the target supports sim themes.
+     * The theme is pulled from one of three places: the user's settings, the
+     * project's pxt.json, or the default theme for the target (in decreasing order
+     * of priority). All keys in this object are tokens (e.g. `background-color`) that
+     * map to a color in `#rrggbb` format except for `layout`, which represents the
+     * configuration of buttons in the sim.
      */
     theme?: { [token: string]: string };
 }
@@ -310,7 +303,10 @@ export interface ProjassetsVisualConfig {
  * and its visual configuration.
  */
 export interface ProjassetsProjectConfig extends ProjassetsVisualConfig {
-    /** The project's name, as the user gave it and as its pxt.json holds it. */
+    /**
+     * The project's current name, which can change if the user renames the project.
+     * Read the project's id from the simx iframe's `project` URL parameter.
+     */
     name: string;
 }
 

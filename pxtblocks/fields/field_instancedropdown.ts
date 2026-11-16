@@ -42,15 +42,10 @@ export function isReservedInstanceValue(value: string): boolean {
 }
 
 /**
- * Returns the options of a fixed-instance dropdown: the instances, then, after
- * a separator, the edit entry (`OPEN_INSTANCE_OPTION_VALUE`) and one create
- * entry per `creates` pair, valued `CREATE_INSTANCE_OPTION_VALUE` followed by
- * the creator id. With no instances and no entry it returns the one
- * `emptyText` entry, valued `NO_INSTANCE_OPTION_VALUE`.
- * @param instances the options of the type's instances
- * @param editText the edit entry's text; undefined when the editor cannot open the instance here
- * @param creates the text and creator id of each create entry, in order
- * @param emptyText the text of the entry saying the type has no instances yet
+ * Takes a list of dropdown menu options and inserts the create, open, and empty placeholder
+ * items as needed. Create and edit are added after the list of instances and a separator menu
+ * item. There is one create item for each entry in `creates`, which pairs the item's text
+ * with the id of the creator it asks.
  */
 export function getInstanceDropdownOptions(instances: Blockly.MenuOption[], editText: string | undefined, creates: [string, string][], emptyText: string): Blockly.MenuOption[] {
     const commands: Blockly.MenuOption[] = [];
@@ -61,16 +56,19 @@ export function getInstanceDropdownOptions(instances: Blockly.MenuOption[], edit
 }
 
 /**
- * The dropdown of a fixed-instance parameter whose instances an editor tab can
- * create. Each time it opens it lists the type's instances from the current
- * API info, then an edit entry while `pxt.react.canOpenInstance` allows it and
- * one create entry per creator `pxt.react.getInstanceCreators` returns.
- * Picking an entry keeps the field's value and calls `pxt.react.openInstance`
- * or `pxt.react.createInstance`. While the type has no instances the value is
- * a reserved marker (see `isReservedInstanceValue`), which the blocks compiler
- * reports and compiles as `null`. Options: `data` (the instances' options),
- * `type`, `blocksInfo`, `getBlocksInfo` (the current API info), `defaultValue`.
- * pxtservices/simulator-extensions.md describes the entries.
+ * A field editor that provides a dropdown for selecting instances of a
+ * type that has the fixedInstances annotation on it. This editor is intended
+ * to be used with simx editor extensions that can emit instances of the
+ * specified type in the user's project. For example, a song editor might
+ * emit instances of a Track type to indicate the different songs that a
+ * user has created within that simx editor.
+ * 
+ * This field editor also provides an optional pair of entry points into the simx
+ * editor from within the dropdown, similar to how the variable dropdown allows
+ * you to edit and create variables within the dropdown itself. These are checked using
+ * `pxt.react.canOpenInstance`/`pxt.react.getInstanceCreators` and invoked using
+ * `pxt.react.openInstance`/`pxt.react.createInstance` respectively. When more than
+ * one simx editor can create the type, the dropdown lists a create item for each.
  */
 export class FieldInstanceDropdown extends FieldDropdown implements FieldCustom {
     public isFieldCustom_ = true;
@@ -93,12 +91,11 @@ export class FieldInstanceDropdown extends FieldDropdown implements FieldCustom 
     }
 }
 
-// Lists the options of the type's instances, built with `imgConv` from the
-// API info `getBlocksInfo` returns, else `data`, then the entry asking to edit
-// the instance the field holds, while the editor can open it, and one entry
-// asking for a new instance per creator of the type's instances, or, with none
-// of these to list, the entry saying the type has no instances yet, all read
-// each time the dropdown opens.
+// Creates a function that returns a dynamic list of menu options
+// based on the instances of the fixedInstance type in the current
+// API info. Will also include placeholder options for creating new
+// instances and editing existing instances if supported by the simx
+// editor extension.
 function createMenuGenerator(options: FieldCustomDropdownOptions, typeName: string, imgConv: pxt.ImageConverter): Blockly.MenuGeneratorFunction {
     const { data, type: typeQName, getBlocksInfo, defaultValue } = options;
     return function (this: Blockly.FieldDropdown) {
@@ -114,8 +111,8 @@ function createMenuGenerator(options: FieldCustomDropdownOptions, typeName: stri
     };
 }
 
-// The label of the option among `instances` whose value is `value`: its text,
-// or its image's alt text; undefined if no option has that value.
+// Finds the display text for a given instance in the menu list. Used by the "edit instance"
+// dropdown menu item.
 function getInstanceLabel(instances: Blockly.MenuOption[], value: string): string | undefined {
     for (const option of instances) {
         if (option === Blockly.FieldDropdown.SEPARATOR || option[1] !== value) continue;
@@ -125,12 +122,8 @@ function getInstanceLabel(instances: Blockly.MenuOption[], value: string): strin
     return undefined;
 }
 
-/**
- * Returns the name the dropdown of a fixed-instance parameter calls the type
- * by: the type's `block` attribute, else its unqualified name in lower case.
- * @param blocksInfo the API info that declares the type; undefined if none is available
- * @param typeQName the type's fully qualified name
- */
+// Finds the display name for the given fixedInstances type. Used by the "new instance"
+// dropdown menu item.
 export function getTypeName(blocksInfo: pxtc.BlocksInfo | undefined, typeQName: string): string {
     const block = blocksInfo?.apis.byQName[typeQName]?.attributes.block;
     return block || typeQName.slice(typeQName.lastIndexOf(".") + 1).toLowerCase();

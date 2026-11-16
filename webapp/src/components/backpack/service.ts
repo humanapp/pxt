@@ -376,7 +376,7 @@ export function backpackErrorMessage(code?: string): string {
     switch (code) {
         case "backpack_request_too_large":
         case "backpack_entry_too_large":
-            return lf("This snippet is too large. Save a smaller block container.");
+            return lf("This snippet is too large. Save fewer blocks.");
         case "backpack_preview_too_large":
             return lf("This snippet's preview is too large. Try saving without a preview.");
         case "backpack_quota_exceeded":
@@ -487,6 +487,18 @@ function localStorage(): BackpackLocalStorage {
     } catch {
         throw new BackpackUserError(lf("Could not access your local backpack. Allow browser storage and try again."));
     }
+}
+
+/** Clear this editor's local backpack without deleting cloud-saved items. */
+export function resetBackpackAsync(): Promise<void> {
+    const targetId = pxt.appTarget.id;
+    identityGeneration++;
+    snapshot = undefined;
+    clearBackpackCache();
+    const operation = queue.then(() => localStorage().clearAsync(targetId));
+    queue = operation.then(() => {}, () => {});
+    notifyBackpackEditorChanged();
+    return operation;
 }
 
 function namespace(context: Identity): string {

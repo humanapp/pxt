@@ -2,44 +2,23 @@
 
 import * as Blockly from "blockly";
 
-/**
- * Returns the fixed instances of the type `qName` that `apis` declares: its
- * variables marked `fixedInstance` whose type is `qName` or a type extending
- * it, by descending `weight` (50 when unset).
- * @param apis the API info declaring the type and its instances
- * @param qName the fully qualified name of the fixed-instance type
- */
-export function getFixedInstanceDropdownValues(apis: pxtc.ApisInfo, qName: string) {
-    const symbols = pxt.Util.values(apis.byQName).filter(sym => sym.kind === pxtc.SymbolKind.Variable
-        && sym.attributes.fixedInstance
-        && isSubtype(apis, sym.retType, qName))
-        .sort((l, r) => (r.attributes.weight || 50) - (l.attributes.weight || 50))
-    return symbols
+export function getSymbolPickerTags(info: pxtc.BlocksInfo, symbol: pxtc.SymbolInfo): string[] {
+    return pxt.sprite.getSymbolTags(info.apis, symbol).map(tag => tag.toLowerCase());
 }
 
-function isSubtype(apis: pxtc.ApisInfo, specific: string, general: string) {
-    if (specific == general) return true
-    let inf = apis.byQName[specific]
-    if (inf && inf.extendsTypes)
-        return inf.extendsTypes.indexOf(general) >= 0
-    return false
+// Defaults can name a constant alias (such as SURVIVAL for GameMode.Survival), so map
+// those to the option they stand for. Defaults that already match an option are left alone.
+export function resolveDropdownDefault(info: pxtc.BlocksInfo, dd: Blockly.MenuOption[], value: string): string {
+    if (!value || dd.some(option => option[1] === value)) return value;
+    const identity = info.apis.byQName[value]?.attributes.enumIdentity;
+    return identity && dd.some(option => option[1] === identity) ? identity : value;
 }
 
 /**
- * Returns the dropdown options of `symbols`, in their order, except that the
- * option whose value is `defaultValue` comes first. An option's value is its
- * symbol's qualified name (`namespace.name`) and its third element the
- * symbol's `ariaLabel`. Its label is the symbol's `block` attribute, else its
- * `blockId`, else its name, less `@set` for a `blockCombine` symbol; a symbol
- * with an icon or a `blockImage` shows as an image descriptor whose `alt` is
- * that label and whose `value` is the symbol's name. A symbol holding a jres
- * image and no icon gets its `iconURL` set to the image converted by
- * `imgConv`.
- * @param symbols the symbols to list
- * @param defaultValue the value of the option to list first; undefined to keep the order of `symbols`
- * @param imgConv the converter of jres images to icons
+ * Returns a list of Blockly menu options from a list of pxt symbols. The `defaultValue` parameter
+ * specifies the option that will always appear first in the list (if present).
  */
-export function getSymbolDropdownOptions(symbols: pxtc.SymbolInfo[], defaultValue: string | undefined, imgConv: pxt.ImageConverter): Blockly.MenuOption[] {
+export function getSymbolDropdownOptions(info: pxtc.BlocksInfo, symbols: pxtc.SymbolInfo[], defaultValue: string | undefined, imgConv: pxt.ImageConverter): Blockly.MenuOption[] {
     const dd: Blockly.MenuOption[] = symbols.map(v => {
         let k = v.attributes.block || v.attributes.blockId || v.name;
         let comb = v.attributes.blockCombine
@@ -54,12 +33,14 @@ export function getSymbolDropdownOptions(symbols: pxtc.SymbolInfo[], defaultValu
                 alt: k,
                 width: 36,
                 height: 36,
-                value: v.name
+                value: v.name,
+                tags: getSymbolPickerTags(info, v)
             } : k,
             v.namespace + "." + v.name,
             v.attributes.ariaLabel
         ];
     });
+    defaultValue = resolveDropdownDefault(info, dd, defaultValue);
     if (defaultValue) {
         let shadowValueIndex = -1;
         dd.some((v, i) => {
@@ -78,15 +59,10 @@ export function getSymbolDropdownOptions(symbols: pxtc.SymbolInfo[], defaultValu
 }
 
 /**
- * Returns the dropdown options of the fixed instances of the type `typeQName`
- * that `blocksInfo` declares (its variables marked `fixedInstance` whose type
- * is `typeQName` or a type extending it), by descending `weight`, except that
- * the option whose value is `defaultValue` comes first.
- * @param blocksInfo the API info declaring the type and its instances
- * @param typeQName the fully qualified name of the fixed-instance type
- * @param defaultValue the value of the option to list first; undefined to keep the instances' order
- * @param imgConv the converter of jres images to icons
+ * Returns a list of dropdown options for a given `fixedInstances` type (and its subtypes)
+ * based on the given API info. The value passed as `defaultValue` will always appear first in
+ * the resulting list if present in the API info.
  */
 export function getFixedInstanceDropdownOptions(blocksInfo: pxtc.BlocksInfo, typeQName: string, defaultValue: string | undefined, imgConv: pxt.ImageConverter): Blockly.MenuOption[] {
-    return getSymbolDropdownOptions(getFixedInstanceDropdownValues(blocksInfo.apis, typeQName), defaultValue, imgConv);
+    return getSymbolDropdownOptions(blocksInfo, pxt.blocks.getFixedInstanceDropdownValues(blocksInfo.apis, typeQName), defaultValue, imgConv);
 }

@@ -58,11 +58,13 @@ The fields of the `simx` entry:
 
 ### The extensions a project includes
 
-The open project includes a registered extension when one of its dependencies, direct or not, is that extension: a `github:` dependency whose full name, `owner/repo` or `owner/repo/path`, equals the key, compared ignoring case. A dependency on another extension of the same repository does not include it. An extension whose registration names another's simulator frame is included only while it also depends on that other extension (see [Sharing another extension's simulator frame](#sharing-another-extensions-simulator-frame)). While the project includes an extension, the editor serves the requests of its frames and offers its [editor tab](#editor-tab).
+An extension is included in a project if it is listed as a dependency in pxt.json or in the pxt.json of one of the project's other dependencies/sub-dependencies. For repositories that contain multiple extensions, including a dependency on another extension of the same repository will not enable the simx features of a sibling extension unless it is also included in the project. An extension that [shares another extension's simulator frame](#sharing-another-extensions-simulator-frame) is only included while it also depends on that extension.
+
+When included by a project, the editor will serve request's to the extension's simx iframes and show the extension's [editor tab](#editor-tab).
 
 ### Grants and trust
 
-The grants (`allowPopups`, `allowClipboard`, `allowCamera`, `allowMidi`, `allowUsb`, `allowSerial`, `allowBluetooth`, `allowHid`, `allowMotionSensors`, `allowDisplayCapture`, `allowGamepad`, `allowDownloads`, `allowPointerLock`, `allowFileWrite`, `allowAssetRead`, `allowProgramRead` and `allowEditorTab`) are approved by the target's owner together with the registration. A grant is given per registration, but grants do not isolate extensions from one another: every simulator extension frame, every tab frame and the main simulator are served from the simulator's one origin, so an extension's frames can reach the frames of another extension, and a request posted from another extension's window is served under that extension's grants. The grants hold among the target's approved extensions, not against each other.
+All of the `allow*` simx registration keys grant permissions to the approved extension. These permissions should be carefully considered before checking them into `targetconfig.json` as many of them can have security implications. The purpose of these permissions is to prevent extensions from arbitrarily accessing certain browser APIs, but it should be noted that these permissions do nothing to isolate one simx extension from another. There are many ways that iframes can communicate with one another to share data (especially if they exist on the same domain).
 
 Nine grants deserve a second look:
 

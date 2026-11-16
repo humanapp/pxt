@@ -42,8 +42,8 @@ an extension copies the ones it needs:
 - projprogram.ts: compile the project and receive the program the simulator
   runs (grant `allowProgramRead`).
 - simxeditor.ts: the editor tab's lifecycle, simulator and action events, its
-  port to the simulator frame, and the simulator frame's request to open the
-  tab (grant `allowEditorTab`).
+  port to the simulator frame, and the simulator frame's requests to list the
+  tabs that talk to it and open one (grant `allowEditorTab`).
 
 Each client reads `parentOrigin` and `apiLevel` from its frame's URL through
 readers it exports (projfs.ts also reads `channel`, `target` and `project`),

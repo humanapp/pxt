@@ -9,8 +9,9 @@ import { getFixedInstanceDropdownOptions } from "./symbolDropdownOptions";
 export const INSTANCE_DROPDOWN_FIELD = "instancedropdown";
 
 /**
- * The value of the entry of the dropdown of a fixed-instance parameter that
- * asks for a new instance of the type. It is not a qualified name, so it never
+ * The start of the value of each entry of the dropdown of a fixed-instance
+ * parameter that asks for a new instance of the type, followed by the id of
+ * the creator it asks. It is not a qualified name, so such a value never
  * equals the value of an instance.
  */
 export const CREATE_INSTANCE_OPTION_VALUE = "@createinstance@";
@@ -32,23 +33,24 @@ export const NO_INSTANCE_OPTION_VALUE = "@noinstance@";
 
 /**
  * Returns true if `value` is one of the values the dropdown of a fixed-instance
- * parameter gives its entries that are not instances:
- * `CREATE_INSTANCE_OPTION_VALUE`, `OPEN_INSTANCE_OPTION_VALUE` or
- * `NO_INSTANCE_OPTION_VALUE`.
+ * parameter gives its entries that are not instances: one starting with
+ * `CREATE_INSTANCE_OPTION_VALUE`, or `OPEN_INSTANCE_OPTION_VALUE` or
+ * `NO_INSTANCE_OPTION_VALUE` itself.
  */
 export function isReservedInstanceValue(value: string): boolean {
-    return value === CREATE_INSTANCE_OPTION_VALUE || value === OPEN_INSTANCE_OPTION_VALUE || value === NO_INSTANCE_OPTION_VALUE;
+    return value.indexOf(CREATE_INSTANCE_OPTION_VALUE) === 0 || value === OPEN_INSTANCE_OPTION_VALUE || value === NO_INSTANCE_OPTION_VALUE;
 }
 
 /**
  * Takes a list of dropdown menu options and inserts the create, open, and empty placeholder
  * items as needed. Create and edit are added after the list of instances and a separator menu
- * item.
+ * item. There is one create item for each entry in `creates`, which pairs the item's text
+ * with the id of the creator it asks.
  */
-export function getInstanceDropdownOptions(instances: Blockly.MenuOption[], editText: string | undefined, createText: string | undefined, emptyText: string): Blockly.MenuOption[] {
+export function getInstanceDropdownOptions(instances: Blockly.MenuOption[], editText: string | undefined, creates: [string, string][], emptyText: string): Blockly.MenuOption[] {
     const commands: Blockly.MenuOption[] = [];
     if (editText !== undefined) commands.push([editText, OPEN_INSTANCE_OPTION_VALUE]);
-    if (createText !== undefined) commands.push([createText, CREATE_INSTANCE_OPTION_VALUE]);
+    for (const [text, id] of creates) commands.push([text, CREATE_INSTANCE_OPTION_VALUE + id]);
     if (!commands.length) return instances.length ? instances.slice() : [[emptyText, NO_INSTANCE_OPTION_VALUE]];
     return instances.length ? [...instances, Blockly.FieldDropdown.SEPARATOR, ...commands] : commands;
 }
@@ -56,7 +58,7 @@ export function getInstanceDropdownOptions(instances: Blockly.MenuOption[], edit
 /**
  * A field editor that provides a dropdown for selecting instances of a
  * type that has the fixedInstances annotation on it. This editor is intended
- * to be used with simx editor extensions that can emit instances of the 
+ * to be used with simx editor extensions that can emit instances of the
  * specified type in the user's project. For example, a song editor might
  * emit instances of a Track type to indicate the different songs that a
  * user has created within that simx editor.
@@ -64,8 +66,9 @@ export function getInstanceDropdownOptions(instances: Blockly.MenuOption[], edit
  * This field editor also provides an optional pair of entry points into the simx
  * editor from within the dropdown, similar to how the variable dropdown allows
  * you to edit and create variables within the dropdown itself. These are checked using
- * `pxt.react.canOpenInstance`/`pxt.react.canCreateInstance` and invoked using
- * `pxt.react.openInstance`/`pxt.react.createInstance` respectively.
+ * `pxt.react.canOpenInstance`/`pxt.react.getInstanceCreators` and invoked using
+ * `pxt.react.openInstance`/`pxt.react.createInstance` respectively. When more than
+ * one simx editor can create the type, the dropdown lists a create item for each.
  */
 export class FieldInstanceDropdown extends FieldDropdown implements FieldCustom {
     public isFieldCustom_ = true;
@@ -79,8 +82,8 @@ export class FieldInstanceDropdown extends FieldDropdown implements FieldCustom 
 
     protected onItemSelected_(menu: Blockly.Menu, menuItem: Blockly.MenuItem) {
         const value = menuItem.getValue();
-        if (value === CREATE_INSTANCE_OPTION_VALUE)
-            pxt.react.createInstance?.(this.typeQName);
+        if (value.indexOf(CREATE_INSTANCE_OPTION_VALUE) === 0)
+            pxt.react.createInstance?.(this.typeQName, value.slice(CREATE_INSTANCE_OPTION_VALUE.length));
         else if (value === OPEN_INSTANCE_OPTION_VALUE)
             pxt.react.openInstance?.(this.getValue());
         else if (value !== NO_INSTANCE_OPTION_VALUE)
@@ -100,9 +103,10 @@ function createMenuGenerator(options: FieldCustomDropdownOptions, typeName: stri
         const instances: Blockly.MenuOption[] = blocksInfo ? getFixedInstanceDropdownOptions(blocksInfo, typeQName, defaultValue, imgConv) : data;
         const value = this.getValue();
         const label = value && pxt.react.canOpenInstance?.(value) ? getInstanceLabel(instances, value) : undefined;
+        const creators = pxt.react.getInstanceCreators?.(typeQName) || [];
         return getInstanceDropdownOptions(instances,
             label !== undefined ? lf("Edit {0}...", label) : undefined,
-            pxt.react.canCreateInstance?.(typeQName) ? lf("New {0}...", typeName) : undefined,
+            creators.map(c => [creators.length === 1 ? lf("New {0}...", typeName) : lf("New {0} in {1}...", typeName, c.label), c.id] as [string, string]),
             lf("No {0} yet", typeName));
     };
 }
